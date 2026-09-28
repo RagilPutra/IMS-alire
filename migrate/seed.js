@@ -1,10 +1,22 @@
-// One-time data migration: loads the real production data exported from
-// the old Claude-artifact database (seed-data.json, sitting next to this
-// script) into the new Postgres `documents` table.
+// Data migration: loads the deduplicated master data + Stock Opname
+// Agustus 2026 export (seed-data.json, sitting next to this script) into
+// the Postgres `documents` table.
 //
-// Safe to re-run: every write is an upsert keyed by (collection, id), so
-// running this twice just re-syncs the same rows rather than duplicating
-// them.
+// This is a REPLACE for the "operational" collections (items, stock,
+// transactions, opnameSessions, opnameDetails, opnameDrafts): each one is
+// fully cleared and reloaded from seed-data.json, because seed-data.json
+// is itself a deduplicated rebuild of the master data -- some old item
+// ids no longer exist post-dedup, and a plain upsert would leave those
+// orphaned rows behind alongside the new ones, recreating the exact
+// duplicate problem this migration fixes. If a collection's array in
+// seed-data.json is empty (transactions, opnameDrafts), the collection is
+// still cleared, just left empty afterwards.
+//
+// suppliers and users are NEVER cleared -- only upserted -- so your
+// supplier list and any custom logins you created stay untouched.
+//
+// Safe to re-run: it always ends at the same state (the content of
+// seed-data.json), whether run once or many times.
 //
 // Usage (from the project root, with DATABASE_URL set):
 //   node migrate/seed.js
@@ -12,6 +24,13 @@
 const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
+
+// Collections that are fully replaced on every run (cleared, then
+// reloaded from seed-data.json). Keep this in sync with the artifact-side
+// migration's deletion scope.
+const REPLACE_COLLECTIONS = new Set([
+  'items', 'stock', 'transactions', 'opnameSessions', 'opnameDetails', 'opnameDrafts',
+]);
 
 async function main() {
   if (!process.env.DATABASE_URL) {
@@ -35,14 +54,17 @@ async function main() {
 
   let total = 0;
   for (const [collection, docs] of Object.entries(seed)) {
-    if (!Array.isArray(docs) || docs.length === 0) {
-      console.log(`  ${collection}: 0 documents (skipped)`);
-      continue;
-    }
+    const list = Array.isArray(docs) ? docs : [];
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
-      for (const doc of docs) {
+
+      if (REPLACE_COLLECTIONS.has(collection)) {
+        const del = await client.query('DELETE FROM documents WHERE collection = $1', [collection]);
+        if (del.rowCount) console.log(`  ${collection}: cleared ${del.rowCount} old documents`);
+      }
+
+      for (const doc of list) {
         await client.query(
           `INSERT INTO documents (collection, id, data, version, updated_at)
            VALUES ($1, $2, $3::jsonb, 1, now())
@@ -52,8 +74,8 @@ async function main() {
         );
       }
       await client.query('COMMIT');
-      console.log(`  ${collection}: ${docs.length} documents migrated`);
-      total += docs.length;
+      console.log(`  ${collection}: ${list.length} documents loaded`);
+      total += list.length;
     } catch (e) {
       await client.query('ROLLBACK');
       throw e;
@@ -62,7 +84,7 @@ async function main() {
     }
   }
 
-  console.log(`\nDone. ${total} documents migrated in total.`);
+  console.log(`\nDone. ${total} documents loaded in total.`);
   await pool.end();
 }
 

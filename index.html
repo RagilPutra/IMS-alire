@@ -67,6 +67,15 @@
     padding:16px 10px 6px;
   }
   .nav-section-label:first-child{padding-top:6px;}
+  .nav-section-toggle{
+    display:flex; align-items:center; justify-content:space-between; width:100%;
+    border:none; background:none; appearance:none; -webkit-appearance:none;
+    cursor:pointer; font-family:inherit; text-align:left; border-radius:var(--radius-sm);
+  }
+  .nav-section-toggle:hover{background:var(--surface-2);}
+  .nav-section-chevron{font-size:9px; color:var(--text-faint); flex-shrink:0; margin-left:8px; transition:color .12s ease;}
+  .nav-section-toggle:hover .nav-section-chevron{color:var(--brand-dark);}
+  .nav-section-items{overflow:hidden;}
   .nav-item{
     display:flex; align-items:center; gap:9px; width:100%; text-align:left; border:none; background:none;
     padding:6.5px 10px; border-radius:var(--radius-sm); font-size:13px; font-weight:600; color:var(--text-secondary);
@@ -138,6 +147,10 @@
   .btn-danger-outline{background:var(--danger-tint); color:var(--danger); border-color:transparent;}
   .btn-approve{background:var(--success); color:#fff;}
   .btn:disabled{opacity:.4; cursor:not-allowed;}
+  .icon-btn{width:27px; height:27px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); background:var(--surface); border-radius:6px; color:var(--text-secondary); cursor:pointer; flex-shrink:0; padding:0;}
+  .icon-btn svg{width:14px; height:14px;}
+  .icon-btn:hover{background:var(--surface-2); color:var(--text); border-color:var(--border-strong);}
+  .icon-btn.icon-btn-danger:hover{background:var(--danger-tint); color:var(--danger); border-color:var(--danger-tint);}
   .action-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; align-items:center;}
 
   /* ---------- KPI strip (NOT cards) ---------- */
@@ -189,6 +202,10 @@
   .table-scroll.dragging-scroll *{user-select:none;}
   table{width:100%; border-collapse:collapse; font-size:12.5px;}
   th{text-align:left; padding:8px 16px; font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--text-faint); border-bottom:1px solid var(--border);}
+  .sort-arrow{display:inline-block; font-size:9.5px; opacity:.45; margin-left:2px;}
+  .sort-arrow.active{opacity:1; color:var(--brand); font-weight:800;}
+  th:hover .sort-arrow{opacity:.8;}
+  th:hover .sort-arrow.active{opacity:1;}
   td{padding:9px 16px; border-bottom:1px solid var(--border); vertical-align:middle;}
   tr:last-child td{border-bottom:none;}
   td.num, th.num{text-align:right; font-variant-numeric:tabular-nums;}
@@ -289,9 +306,9 @@
   /* ---------- Donut chart (Nilai Stok distribution) ---------- */
   .donut-wrap{display:flex; align-items:center; gap:24px; flex-wrap:wrap; padding:4px 16px 16px;}
   .donut{position:relative; width:158px; height:158px; border-radius:50%; flex-shrink:0;}
-  .donut-hole{position:absolute; inset:21px; border-radius:50%; background:var(--surface); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:6px;}
+  .donut-hole{position:absolute; inset:18px; border-radius:50%; background:var(--surface); display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:4px 6px; overflow:hidden;}
   .donut-hole-label{font-size:10.5px; color:var(--text-faint); font-weight:700;}
-  .donut-hole-value{font-size:16px; font-weight:800; color:var(--text); margin-top:3px; line-height:1.15;}
+  .donut-hole-value{font-size:16px; font-weight:800; color:var(--text); margin-top:3px; line-height:1.15; max-width:100%; white-space:nowrap;}
   .donut-hole-pct{font-size:11px; color:var(--text-faint); font-weight:600; margin-top:2px;}
   .donut-legend{display:flex; flex-direction:column; gap:9px; flex:1; min-width:170px;}
   .donut-legend-row{display:flex; align-items:center; gap:8px;}
@@ -393,6 +410,10 @@
   .dash-wh-parts .loc-row .lr-name{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .dash-wh-parts .loc-row .lr-val{width:118px; flex-shrink:0; text-align:right;}
   .dash-wh-parts .loc-row .lr-pct{width:36px; flex-shrink:0; text-align:right; margin-left:10px;}
+  .dash-total-row{justify-content:flex-start; padding:10px 12px; margin:8px 16px 14px; border-radius:6px;}
+  .dash-total-row .lr-name{flex:1; min-width:0; white-space:nowrap;}
+  .dash-total-row .lr-val{width:118px; flex-shrink:0; text-align:right;}
+  .dash-total-row .lr-pct{width:36px; flex-shrink:0; text-align:right; margin-left:10px; color:var(--text);}
 
   .drawer-stats-2col{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:16px;}
   .drawer-mini-stats{display:grid; grid-template-columns:1fr 1fr 1fr; border:1px solid var(--border); border-radius:8px; margin-bottom:6px; overflow:hidden;}
@@ -775,9 +796,21 @@ const DIRECT_WAREHOUSES = WAREHOUSES.filter(w=>w.type==='direct');
    Staff Meal, which has its own warehouse but no login of its own -- it's
    managed through Kitchen), location alone already tells you who it belongs
    to, so peruntukan no longer applies there. */
+// Peruntukan (allocation bucket within Gudang Utama) is a different concept
+// from the divisi warehouses (DIRECT_WAREHOUSES) even though the ids line up
+// 1:1 -- so it gets its own short display names (Kitchen, Bar, ...) instead
+// of reusing "Kitchen Storage" etc., which read as if it were the storage
+// location itself. Ids are unchanged (still match DIRECT_WAREHOUSES ids plus
+// 'mix') since stock docs are keyed by them; only the label and the display
+// order changed (Mix Use moved last).
 const PERUNTUKAN_OPTIONS = [
+  {id:'kitchen', name:'Kitchen'},
+  {id:'bar', name:'Bar'},
+  {id:'service', name:'Service'},
+  {id:'housekeeping', name:'Housekeeping'},
+  {id:'security', name:'Security'},
+  {id:'management', name:'Office'},
   {id:'mix', name:'Mix Use'},
-  ...DIRECT_WAREHOUSES.filter(w=>w.id!=='staff_meal').map(w=>({id:w.id, name:w.name})),
 ];
 function isStorageWarehouse(warehouseId){ return STORAGE_WAREHOUSES.some(w=>w.id===warehouseId); }
 function peruntukanName(id){ const p = PERUNTUKAN_OPTIONS.find(x=>x.id===id); return p ? p.name : 'Mix Use'; }
@@ -855,11 +888,13 @@ const NAV = [
   {id:'inventory', label:'Inventory', icon:'box', section:'OPERASIONAL', perm: canViewInventory},
   {id:'receiving', label:'Penerimaan Barang', icon:'arrivein', section:'OPERASIONAL', perm: canReceive},
   {id:'storerequests', label:'Permintaan Barang', icon:'swap', section:'OPERASIONAL', badgeKey:'pending'},
+  {id:'wiprequests', label:'Permintaan WIP', icon:'utensils', section:'OPERASIONAL', badgeKey:'pendingwip', perm: canSeeWipNav},
   {id:'items', label:'Barang', icon:'list', section:'MASTER DATA', perm: canViewMasterData},
   {id:'suppliers', label:'Supplier', icon:'truck', section:'MASTER DATA', perm: canViewSuppliers},
   {id:'locations', label:'Lokasi', icon:'pin', section:'MASTER DATA', perm: canViewMasterData},
   {id:'report-masuk', label:'Barang Masuk', icon:'inflow', section:'LAPORAN', perm: canViewOpsReports},
   {id:'report-keluar', label:'Barang Bergerak', icon:'move', section:'LAPORAN', perm: canViewOpsReports},
+  {id:'report-wip', label:'Laporan Pencatatan WIP', icon:'utensils', section:'LAPORAN', perm: canSeeWipNav},
   {id:'lowstock', label:'Stok Rendah', icon:'alert', section:'LAPORAN', badgeKey:'lowstock', perm: canViewOpsReports},
   {id:'report-divisi', label:'Nilai per Divisi', icon:'stack', section:'LAPORAN', perm: canViewReports},
   {id:'stockopname', label:'Stok Opname', icon:'checklist', section:'LAPORAN', perm: canManageGudang},
@@ -882,6 +917,7 @@ const ICONS = {
   box:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
   stack:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>',
   docfile:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2h9l5 5v15H6z"/><path d="M15 2v5h5"/><path d="M9 13h6M9 17h6"/></svg>',
+  utensils:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v5M7.3 2v5M9.6 2v5"/><path d="M5 7c0 2 1.15 3.1 2.3 3.4V22"/><path d="M9.6 7c0 2-1.15 3.1-2.3 3.4"/><path d="M17.4 2c-2.1 0-3.8 2.1-3.8 4.9 0 2.6 1.6 4.3 3.8 4.3s3.8-1.7 3.8-4.3c0-2.8-1.7-4.9-3.8-4.9z"/><path d="M17.4 11.2V22"/></svg>',
   arrivein:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>',
   arrowright:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h16M13 5l7 7-7 7"/></svg>',
   inflow:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v10"/><path d="M8 9l4 4 4-4"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>',
@@ -892,6 +928,7 @@ const ICONS = {
   pin:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 21s-7-6.2-7-11a7 7 0 1 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>',
   gear:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
   trash:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
+  edit:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/></svg>',
   eye:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>',
   eyeoff:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c7 0 10.5 7 10.5 7a13.5 13.5 0 0 1-3.15 4.15M6.6 6.6C3.4 8.6 1.5 12 1.5 12s3.5 7 10.5 7a10.4 10.4 0 0 0 4.9-1.2"/><path d="M9.5 9.6a3 3 0 0 0 4.2 4.2"/></svg>',
 };
@@ -915,8 +952,10 @@ const state = {
   dashboardStockMode: 'value',
   invSearch: '', invCategory: '', invStatus: '', invLocation: '', invPeruntukan: '', invSort: 'name_asc', invPage: 1, invPageSize: 50,
   srTab: 'menunggu', srPage: 1, srPageSize: 50, srSearch: '', srDateFrom: '', srDateTo: '',
+  wipTab: 'menunggu', wipPage: 1, wipPageSize: 50, wipSearch: '', wipDateFrom: '', wipDateTo: '',
   reportMasukLocation: '', reportMasukSupplier: '', reportMasukPage: 1, reportMasukPageSize: 50, reportMasukSearch: '', reportMasukDateFrom: '', reportMasukDateTo: '',
   reportKeluarLocation: '', reportKeluarPage: 1, reportKeluarPageSize: 50, reportKeluarSearch: '', reportKeluarDateFrom: '', reportKeluarDateTo: '',
+  reportWipPage: 1, reportWipPageSize: 50, reportWipSearch: '', reportWipDateFrom: '', reportWipDateTo: '',
   receivingSearch: '', receivingDateFrom: '', receivingDateTo: '', receivingPage: 1, receivingPageSize: 50,
   transfersSearch: '', transfersDateFrom: '', transfersDateTo: '', transfersPage: 1, transfersPageSize: 50,
   lowStockSearch: '', lowStockStatus: '', lowStockLocation: '', lowStockPage: 1, lowStockPageSize: 50,
@@ -927,10 +966,12 @@ const state = {
   customUsers: [],
   itemsSelected: new Set(),
   opnameSessions: [],
-  opnameCountLocation: null, opnameSearch: '', opnamePage: 1, opnamePeriod: currentPeriodKey(),
+  opnameDrafts: [], // in-progress (unsubmitted) counting sessions, one per locationId+periodKey -- see saveOpnameDraftNow()
+  opnameCountLocation: null, opnameSearch: '', opnamePage: 1, opnamePeriod: currentPeriodKey(), opnamePeruntukan: '', opnameSort: 'name_asc',
   activityLogSearch: '', activityLogType: '', activityLogPage: 1,
   monthlyNetSales: [],
-  reportOpname: { tab:'r1', asOf:'live', period: currentPeriodKey(), histCache:{}, purchaseCache:{}, loadingHist:false, loadingPurchase:false, r1Search:'', r1Sort:{field:'default', dir:'asc'} },
+  reportOpname: { tab:'r1', asOf:'', period: currentPeriodKey(), histCache:{}, purchaseCache:{}, loadingHist:false, loadingPurchase:false, r1Search:'', r1Category:'', r1Location:'', r1Sort:{field:'default', dir:'asc'} },
+  navCollapsedSections: {}, // sidebar groups (Operasional/Master Data/Laporan) default open; toggled via toggleNavSection()
 };
 
 function currentRole(){ return ROLES.find(r=>r.id===state.role) || ROLES[0]; }
@@ -994,6 +1035,27 @@ function canSeeSRForDivision(role, divisionId){
   return false;
 }
 function isKitchenGatePending(sr){ return !!sr && sr.status==='menunggu' && sr.kitchenGateStatus==='pending'; }
+
+/* Permintaan WIP: a logbook of WIP hand-offs between kitchen divisions,
+   decoupled from Permintaan Barang (SR) -- see actionWipRequestDoc for why.
+   Only relevant to kitchen roles, since WIP Kitchen only ever moves between
+   the 7 kitchen_* divisions sharing Kitchen Storage. */
+function canSeeWipNav(role){ return role.kind==='master' || role.kind==='receiving' || role.kind==='kitchen_leader' || (role.kind==='divisi' && role.divisionIds && role.divisionIds.some(isKitchenDivision)); }
+function canCreateWipRequest(role){ return role.kind==='master' || role.kind==='kitchen_leader' || (role.kind==='divisi' && role.divisionIds && role.divisionIds.some(isKitchenDivision)); }
+function canDeleteWip(role, w){
+  if(!w || w.status!=='menunggu') return false;
+  if(role.kind==='master') return true;
+  if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
+  if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
+  return false;
+}
+function isWipGatePending(w){ return !!w && w.status==='menunggu' && w.kitchenGateStatus==='pending'; }
+function wipStatusTag(w){ if(isWipGatePending(w)) return '<span class="tag tag-kitchen-gate">Menunggu Kitchen Leader</span>'; return statusTag(w.status); }
+function pendingWipCount(){
+  const role = currentRole();
+  const docs = new Set(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
+  return docs.size;
+}
 
 function whById(id){ return WAREHOUSES.find(w=>w.id===id); }
 function whName(id){ const w = whById(id); return w ? w.name : (id||'—'); }
@@ -1087,8 +1149,9 @@ function uomSelectOptions(selected){
   if(selected && !uoms.includes(selected)) uoms.unshift(selected);
   return uoms.map(u=>`<option value="${u}" ${u===selected?'selected':''}>${u}</option>`).join('');
 }
-function nowDatetimeLocalValue(){
-  const d = new Date();
+function nowDatetimeLocalValue(){ return toDatetimeLocalValue(); }
+function toDatetimeLocalValue(iso){
+  const d = iso ? new Date(iso) : new Date();
   const pad = n => String(n).padStart(2,'0');
   return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
 }
@@ -1235,6 +1298,16 @@ async function initDb(){
     render();
   }, err=>{ /* opname collection may not exist yet; ignore */ });
 
+  db.collection('opnameDrafts').onSnapshot(snap=>{
+    state.opnameDrafts = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    // Skip the reactive re-render while the counting page itself is open --
+    // that page reads a draft only once, at openOpnameCounting() time, and a
+    // full render() here would otherwise fire on every one of our own
+    // debounced autosaves echoing back and silently drop focus out of
+    // whichever "Jumlah Fisik" input the counter is mid-typing in.
+    if(state.view !== 'opname-count') render();
+  }, err=>{ /* opnameDrafts collection may not exist yet; ignore */ });
+
   db.collection('monthlyNetSales').onSnapshot(snap=>{
     state.monthlyNetSales = snap.docs.map(d=>({id:d.id, ...d.data()}));
     render();
@@ -1349,6 +1422,87 @@ async function actionReceivingDoc(payload){
   }
   toast('Penerimaan ' + docNumber + ' disimpan (' + payload.lines.length + ' barang).');
   return docNumber;
+}
+
+/* Editing a receipt that already moved stock means every changed line has to
+   have its OLD stock effect reversed before the NEW one is applied -- a line
+   kept (has _txId) gets its old (warehouse, item, qty, peruntukan) subtracted
+   back out, then the edited amount added in; a brand-new line just adds; a
+   line removed during editing also gets its old effect subtracted before its
+   transaction record is deleted. adjustStock() itself floors at 0, so this
+   can never push a stock record negative even if the goods already moved on
+   elsewhere -- worst case the count settles at 0 instead of going negative. */
+async function actionEditReceivingDoc(docNumber, payload){
+  const existingLines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
+  const first = existingLines[0];
+  const keepIds = new Set();
+  for(const line of payload.lines){
+    const item = await getOrCreateItem({name: line.itemName, category: line.category, uom: line.uom});
+    const peruntukan = isStorageWarehouse(line.locationId) ? (line.peruntukan || 'mix') : null;
+    if(line._txId){
+      keepIds.add(line._txId);
+      const orig = existingLines.find(e=>e.id===line._txId);
+      if(orig){
+        const origPeruntukan = isStorageWarehouse(orig.toWarehouseId) ? (orig.peruntukan||'mix') : null;
+        await adjustStock(orig.toWarehouseId, orig.itemId, -(orig.qty||0), origPeruntukan);
+      }
+      await adjustStock(line.locationId, item.id, line.qty, peruntukan);
+      if(line.price>0) await setItemLastPrice(item.id, line.price);
+      await db.doc('transactions/'+line._txId).update({
+        itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
+        price:line.price||0, totalValue:(line.price||0)*line.qty,
+        toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
+        peruntukan: peruntukan,
+        supplierId: payload.supplierId||'', supplierName: payload.supplierName||'',
+        note: payload.note||'', doNumber: payload.doNumber||'', ppn: payload.ppn||0,
+        createdAt: payload.createdAt || (orig ? orig.createdAt : null),
+      });
+    } else {
+      await adjustStock(line.locationId, item.id, line.qty, peruntukan);
+      if(line.price>0) await setItemLastPrice(item.id, line.price);
+      await logTx({
+        type:'in', status:'completed', docNumber,
+        itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
+        price:line.price||0, totalValue:(line.price||0)*line.qty,
+        toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
+        peruntukan: peruntukan,
+        supplierId: payload.supplierId||'', supplierName: payload.supplierName||'', note: payload.note||'',
+        doNumber: payload.doNumber||'', ppn: payload.ppn||0, attachmentId: first.attachmentId||null,
+        createdAt: payload.createdAt || first.createdAt,
+      });
+    }
+  }
+  for(const line of existingLines){
+    if(!keepIds.has(line.id)){
+      const origPeruntukan = isStorageWarehouse(line.toWarehouseId) ? (line.peruntukan||'mix') : null;
+      await adjustStock(line.toWarehouseId, line.itemId, -(line.qty||0), origPeruntukan);
+      await db.doc('transactions/'+line.id).delete();
+    }
+  }
+  toast('Penerimaan ' + docNumber + ' berhasil diubah.');
+}
+
+function confirmDeleteReceiving(docNumber){
+  const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  if(lines.length===0) return;
+  if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
+  openConfirm('Hapus Penerimaan', `Hapus Penerimaan ${docNumber}? Stok yang sudah masuk dari dokumen ini akan dikurangi kembali. Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteReceiving(docNumber), 'Hapus', true);
+}
+async function actionDeleteReceiving(docNumber){
+  const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  if(lines.length===0) return;
+  if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
+  try{
+    for(const line of lines){
+      const peruntukan = isStorageWarehouse(line.toWarehouseId) ? (line.peruntukan||'mix') : null;
+      await adjustStock(line.toWarehouseId, line.itemId, -(line.qty||0), peruntukan);
+    }
+    for(const line of lines){ await db.doc('transactions/'+line.id).delete(); }
+    toast('Penerimaan ' + docNumber + ' dihapus, stok dikembalikan.');
+  }catch(err){
+    toast(err.message || 'Gagal menghapus penerimaan. Coba lagi.', true);
+  }
 }
 
 /* --- Transfer manual (Gudang Utama <-> Gudang Utama, tidak terkait Permintaan) --- */
@@ -1930,10 +2084,16 @@ function pendingCount(){
   return docs.size;
 }
 
+function toggleNavSection(section){
+  state.navCollapsedSections[section] = !state.navCollapsedSections[section];
+  renderShell();
+}
 function navItemHtml(n){
   let badgeHtml = '';
   if(n.badgeKey==='pending' && pendingCount()>0){
     badgeHtml = `<span class="nav-badge">${pendingCount()}</span>`;
+  } else if(n.badgeKey==='pendingwip' && pendingWipCount()>0){
+    badgeHtml = `<span class="nav-badge">${pendingWipCount()}</span>`;
   } else if(n.badgeKey==='lowstock'){
     const rows = getLowStockRows();
     const lowCount = rows.filter(r=>r.status==='rendah').length;
@@ -1954,16 +2114,37 @@ function navItemHtml(n){
 function renderShell(){
   const role = currentRole();
   const sidebar = document.getElementById('sidebar');
+  // sidebar.innerHTML gets fully rebuilt below on every render() (i.e. on
+  // every navigation), which throws away the old .nav-scroll DOM node and
+  // silently resets its scroll position to 0 -- so clicking an item near
+  // the bottom of a long nav list (e.g. Laporan > Stok Opname) visibly
+  // yanked the sidebar back up to the top. Capture the scroll offset
+  // before the rebuild and reapply it to the fresh node afterward.
+  const prevNavScroll = sidebar.querySelector('.nav-scroll');
+  const navScrollTop = prevNavScroll ? prevNavScroll.scrollTop : 0;
   const visibleNav = NAV.filter(n=>!n.perm || n.perm(role));
-  let navHtml = '';
-  let lastSection = undefined;
+  // Group nav items by section (preserving first-seen order) so each
+  // section (besides Utama) can be collapsed independently -- default open.
+  const navSections = [];
   visibleNav.forEach(n=>{
-    if(n.section !== lastSection){
-      if(n.section) navHtml += `<div class="nav-section-label">${n.section}</div>`;
-      lastSection = n.section;
-    }
-    navHtml += navItemHtml(n);
+    let sec = navSections.find(s=>s.name===n.section);
+    if(!sec){ sec = {name:n.section, items:[]}; navSections.push(sec); }
+    sec.items.push(n);
   });
+  const navHtml = navSections.map(sec=>{
+    const itemsHtml = sec.items.map(navItemHtml).join('');
+    if(!sec.name) return itemsHtml;
+    const collapsible = sec.name !== 'UTAMA';
+    if(!collapsible) return `<div class="nav-section-label">${sec.name}</div>${itemsHtml}`;
+    const collapsed = !!state.navCollapsedSections[sec.name];
+    return `
+      <button type="button" class="nav-section-label nav-section-toggle" onclick="toggleNavSection('${sec.name}')">
+        <span>${sec.name}</span>
+        <span class="nav-section-chevron">${collapsed ? '▸' : '▾'}</span>
+      </button>
+      <div class="nav-section-items" ${collapsed ? 'style="display:none;"' : ''}>${itemsHtml}</div>
+    `;
+  }).join('');
   sidebar.innerHTML = `
     <div class="brand-row"><img src="${ALIRE_LOGO_SRC}" alt="Alire"><div class="brand-caption">Inventory Management</div></div>
     <div class="nav-scroll">${navHtml}</div>
@@ -1973,9 +2154,11 @@ function renderShell(){
       ${ICONS.gear}
     </button>
   `;
+  const newNavScroll = sidebar.querySelector('.nav-scroll');
+  if(newNavScroll) newNavScroll.scrollTop = navScrollTop;
 
   const mobileNav = document.getElementById('mobileNav');
-  mobileNav.innerHTML = visibleNav.map(n=>`<button class="${state.view===n.id?'active':''}" onclick="goto('${n.id}')">${n.label}${n.badgeKey==='pending'&&pendingCount()>0?' ('+pendingCount()+')':''}</button>`).join('')
+  mobileNav.innerHTML = visibleNav.map(n=>`<button class="${state.view===n.id?'active':''}" onclick="goto('${n.id}')">${n.label}${n.badgeKey==='pending'&&pendingCount()>0?' ('+pendingCount()+')':''}${n.badgeKey==='pendingwip'&&pendingWipCount()>0?' ('+pendingWipCount()+')':''}</button>`).join('')
     + `<button class="${state.view==='setting'?'active':''}" onclick="goto('setting')">Akun</button>`;
 
   document.getElementById('topbarRight').innerHTML = `
@@ -1997,6 +2180,7 @@ function renderShell(){
     'activity-log':['Aktivitas Terbaru','Seluruh riwayat pergerakan barang'],
     'opname-count':['Hitung Fisik','Masukkan jumlah fisik hasil hitung'],
     storerequests:['Permintaan Barang','Permintaan dari divisi ke Gudang Utama'],
+    wiprequests:['Permintaan WIP','Serah-terima WIP antar divisi kitchen — tidak memengaruhi stok/inventory maupun Stock Opname'],
     receiving:['Penerimaan Barang','Barang masuk dari supplier'],
     items:['Barang','Master data katalog barang'],
     suppliers:['Supplier','Master data pemasok'],
@@ -2006,6 +2190,7 @@ function renderShell(){
     lowstock:['Stok Rendah dan Habis','Barang yang perlu segera diisi ulang di Gudang Utama'],
     'report-divisi':['Nilai per Divisi','Nilai stok tiap divisi, termasuk yang masih di Gudang Utama'],
     'report-opname':['Laporan Stock Opname','Stock Opname, Nilai Penggunaan, F&B Cost, dan KPI Ideal Stock'],
+    'report-wip':['Laporan Pencatatan WIP','Rekap frekuensi Permintaan WIP yang sudah tercatat (disetujui) antar divisi kitchen'],
     setting:['Pengaturan','Akun'],
   };
   const t = titles[state.view] || ['', ''];
@@ -2141,6 +2326,23 @@ function getStorageBreakdown(mode){
     return { warehouse: sw, parts };
   });
 }
+/* Collapses getStorageBreakdown()'s per-warehouse parts into one grand total
+   PER PERUNTUKAN across all Gudang Utama locations combined -- e.g. total
+   "Kitchen" allocation summed over Dry+Cold+Freezer+... storage, instead of
+   the per-warehouse view above. Reuses the already-computed breakdown rather
+   than re-querying stockQtyByPeruntukan for every item again. */
+function getPeruntukanTotalBreakdown(storageBreakdown){
+  const totals = {};
+  storageBreakdown.forEach(sb=>{
+    sb.parts.forEach(p=>{
+      const t = totals[p.id] || (totals[p.id] = { id:p.id, name:p.name, val:0 });
+      t.val += p.val;
+    });
+  });
+  const entries = Object.values(totals).sort((a,b)=>b.val-a.val);
+  const total = entries.reduce((s,e)=>s+e.val,0);
+  return entries.map(e=>({...e, pct: total>0 ? (e.val/total*100) : 0}));
+}
 /* ---------- Donut chart for "Nilai Stok" distribution ---------- */
 const DONUT_COLORS = ['#6B3F22','#8B5E3C','#A97C52','#C39A72','#D9B896','#E8CEB0','#F1E0C9'];
 function donutSegmentColor(i){ return DONUT_COLORS[i % DONUT_COLORS.length]; }
@@ -2159,12 +2361,18 @@ function donutChartHtml(entries, mode, holeLabel){
   const total = entries.reduce((s,e)=>s+e.val,0);
   if(entries.length===0 || total<=0) return '';
   const fmtVal = v => mode==='value' ? fmtIDR(v) : fmtNum(v);
+  const valueStr = fmtVal(total);
+  // The hole is a fixed ~110px circle -- a long Rupiah total ("Rp238.578.054")
+  // set at the normal 16px was wider than that, so it spilled over the ring
+  // instead of staying inside it. Scale the font down as the string grows
+  // instead of letting it overflow.
+  const valueFontSize = valueStr.length > 13 ? '12px' : valueStr.length > 10 ? '13.5px' : '16px';
   return `
     <div class="donut-wrap">
       <div class="donut" style="background:${donutGradientCss(entries)};">
         <div class="donut-hole">
           <div class="donut-hole-label">${escapeHtml(holeLabel||'Total')}</div>
-          <div class="donut-hole-value">${fmtVal(total)}</div>
+          <div class="donut-hole-value" style="font-size:${valueFontSize};">${valueStr}</div>
           <div class="donut-hole-pct">100%</div>
         </div>
       </div>
@@ -2180,14 +2388,17 @@ function donutChartHtml(entries, mode, holeLabel){
     </div>`;
 }
 function getLowStockRows(){
+  // Only items that have an actual stock record in Gudang Utama -- meaning
+  // they've entered inventory at least once (a goods receipt, a transfer,
+  // etc.) -- are eligible to be judged Rendah/Habis here. A Master Barang
+  // entry that was just registered and never received yet is simply not in
+  // inventory yet; it isn't "Habis" and shouldn't show up in this report.
   const rows = [];
   const seenPairs = new Set();
-  const itemsWithAnyStorageRecord = new Set();
   state.stock.forEach(s=>{
     if(!isStorageWarehouse(s.warehouseId)) return; // Stok Rendah scoped to Gudang Utama only: consumption at gudang divisi isn't tracked outside Stock Opname, so a low-stock read there would be unreliable
     const item = itemById(s.itemId);
     if(!item) return;
-    itemsWithAnyStorageRecord.add(item.id);
     const pairKey = item.id + '__' + s.warehouseId;
     if(seenPairs.has(pairKey)) return; // combine peruntukan-split docs into one total per location, checked once
     seenPairs.add(pairKey);
@@ -2197,16 +2408,6 @@ function getLowStockRows(){
     if(qty <= 0) status = 'habis';
     else if(reorder > 0 && qty <= reorder) status = 'rendah';
     if(status) rows.push({ item, location: whById(s.warehouseId), qty, reorder, status, sortTime: s.updatedAt || item.createdAt || '' });
-  });
-  // Items with zero stock everywhere in Gudang Utama that never even got a stock record there
-  // (e.g. imported via Excel but never actually received) are just as "Habis" as ones that were
-  // later depleted -- they were invisible before this fix because there was no stock doc to scan.
-  state.items.forEach(item=>{
-    if(itemsWithAnyStorageRecord.has(item.id)) return;
-    const storageStock = STORAGE_WAREHOUSES.reduce((s,w)=> s + stockQty(w.id, item.id), 0);
-    if(storageStock <= 0){
-      rows.push({ item, location: null, qty: 0, reorder: item.reorderLevel || 0, status: 'habis', sortTime: item.createdAt || '' });
-    }
   });
   rows.sort((a,b)=>{
     if(a.status !== b.status) return a.status==='rendah' ? -1 : 1;
@@ -2276,6 +2477,7 @@ function renderDashboard(){
      the "Rincian Gudang Utama per Peruntukan" panel shows one grand total,
      not just per-warehouse subtotals. */
   const storageGrandTotal = storageBreakdown.reduce((s,sb)=>s+sb.parts.reduce((s2,p)=>s2+p.val,0), 0);
+  const peruntukanTotals = getPeruntukanTotalBreakdown(storageBreakdown);
 
   const lowStockRows = getLowStockRows();
 
@@ -2335,10 +2537,10 @@ function renderDashboard(){
                 <div class="ln-pct">${x.pct.toFixed(0)}%</div>
               </div>`).join('')}
           <div class="locsum-row" style="background:var(--surface-2);">
-            <div class="ln-name" style="font-weight:800;">Total</div>
-            <div class="ln-value" style="font-weight:800;">${mode==='value' ? fmtIDR(locTotal) : fmtNum(locTotal)}</div>
+            <div class="ln-name" style="font-weight:800; font-size:14px;">Total</div>
+            <div class="ln-value" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(locTotal) : fmtNum(locTotal)}</div>
             <div class="ln-track"></div>
-            <div class="ln-pct" style="font-weight:800;">100%</div>
+            <div class="ln-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
           </div>
         </div>
         <div class="dash-split-col">
@@ -2369,14 +2571,37 @@ function renderDashboard(){
             </div>`;
             }).join('')}
           ${storageBreakdown.filter(sb=>sb.parts.length>0).length===0 ? '' : `
-          <div class="locsum-row" style="background:var(--surface-2);">
-            <div class="ln-name" style="font-weight:800;">Total Gudang Utama</div>
-            <div class="ln-value" style="font-weight:800;">${mode==='value' ? fmtIDR(storageGrandTotal) : fmtNum(storageGrandTotal)}</div>
-            <div class="ln-track"></div>
-            <div class="ln-pct" style="font-weight:800;">${(locTotal>0 ? (storageGrandTotal/locTotal*100) : 0).toFixed(0)}%</div>
+          <div class="loc-row dash-total-row" style="background:var(--surface-2);">
+            <div class="lr-name" style="font-weight:800; font-size:14px;">Total Gudang Utama</div>
+            <div class="lr-val" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(storageGrandTotal) : fmtNum(storageGrandTotal)}</div>
+            <div class="lr-pct" style="font-weight:800; font-size:13px;">${(locTotal>0 ? (storageGrandTotal/locTotal*100) : 0).toFixed(0)}%</div>
           </div>`}
         </div>
       </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Total Peruntukan Gudang Utama</h3>
+      </div>
+      <div class="dash-split-label" style="padding-top:16px;">Gabungan Seluruh Lokasi per Peruntukan</div>
+      <div class="dash-split-sublabel">Total ${mode==='value'?'nilai stok':'jumlah'} tiap peruntukan, digabung dari semua lokasi Gudang Utama (bukan dipecah per lokasi)</div>
+      <div class="locsum-head"><span>Peruntukan</span><span>${mode==='value'?'Nilai Stok':'Jumlah'}</span><span>Persentase</span></div>
+      ${peruntukanTotals.length===0 ? `<div class="empty-row" style="padding:26px 16px;">Belum ada stok di Gudang Utama.</div>` :
+        peruntukanTotals.map((x,i)=>`
+          <div class="locsum-row">
+            <div class="ln-name">${escapeHtml(x.name)}</div>
+            <div class="ln-value">${mode==='value' ? fmtIDR(x.val) : fmtNum(x.val)}</div>
+            <div class="ln-track"><div class="ln-fill" style="width:${Math.max(2, x.pct)}%; background:${donutSegmentColor(i)};"></div></div>
+            <div class="ln-pct">${x.pct.toFixed(0)}%</div>
+          </div>`).join('')}
+      ${peruntukanTotals.length===0 ? '' : `
+      <div class="locsum-row" style="background:var(--surface-2);">
+        <div class="ln-name" style="font-weight:800; font-size:14px;">Total</div>
+        <div class="ln-value" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(storageGrandTotal) : fmtNum(storageGrandTotal)}</div>
+        <div class="ln-track"></div>
+        <div class="ln-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
+      </div>`}
     </div>
 
     <div class="panel">
@@ -2758,14 +2983,19 @@ function renderStokOpname(){
               const done = locationsDone[w.id];
               const usedVal = locationUsedValues[w.id];
               const usedColor = usedVal>0 ? 'var(--text)' : (usedVal<0 ? 'var(--success)' : 'var(--text-faint)');
+              const draft = !done ? findOpnameDraft(w.id, periodKey) : null;
+              const statusTag = done ? '<span class="tag tag-approved">Selesai</span>'
+                : draft ? `<span class="tag tag-pending">Draft</span><div class="cell-sub">tersimpan ${fmtTime(draft.updatedAt)}</div>`
+                : '<span class="tag tag-pending">Belum</span>';
+              const btnLabel = done ? 'Ulangi Opname' : (draft ? 'Lanjutkan Opname' : 'Mulai Opname');
               return `<tr>
                 <td class="cell-title">${w.name}</td>
                 <td class="num">${done ? fmtIDR(locationValues[w.id]) : '—'}</td>
                 <td class="num">${done ? fmtIDR(locationAddedGoodsValues[w.id]||0) : '—'}</td>
                 <td class="num">${done ? fmtIDR(locationAddedWipValues[w.id]||0) : '—'}</td>
                 <td class="num" style="color:${usedColor};">${done ? fmtIDR(usedVal||0) : '—'}</td>
-                <td>${done ? '<span class="tag tag-approved">Selesai</span>' : '<span class="tag tag-pending">Belum</span>'}</td>
-                <td>${canOpname ? `<button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">${done?'Ulangi':'Mulai'} Opname</button>` : ''}</td>
+                <td>${statusTag}</td>
+                <td>${canOpname ? `<button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">${btnLabel}</button>` : ''}</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -2773,16 +3003,16 @@ function renderStokOpname(){
       </div>
     </div>
 
-    ${canOpname && session ? `
+    ${canOpname ? `
     <div class="panel">
       <div class="panel-head"><h3>Selesaikan Periode Ini</h3></div>
       <div class="panel-body" style="padding:14px 16px;">
         <div class="two-col">
           <div class="field" style="margin:0;"><label>Total Nilai Stok (otomatis)</label><div class="cell-title" style="padding:8px 0;">${fmtIDR(totalValueSoFar)}</div></div>
-          <div class="field" style="margin:0;"><label>Net Sales Bulan Ini</label><input type="text" inputmode="numeric" id="opnameNetSales" placeholder="0" value="${session.netSales?Number(session.netSales).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" ${session.status==='selesai'?'disabled':''}></div>
+          <div class="field" style="margin:0;"><label>Net Sales Bulan Ini</label><input type="text" inputmode="numeric" id="opnameNetSales" placeholder="0" value="${session && session.netSales?Number(session.netSales).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" ${session && session.status==='selesai'?'disabled':''}></div>
         </div>
         <div class="cell-sub" style="margin-top:4px;">Total Nilai Terpakai periode ini: <b style="color:var(--text);">${fmtIDR(totalUsedSoFar)}</b></div>
-        ${session.status==='selesai' ?
+        ${session && session.status==='selesai' ?
           `<div class="lock-note" style="margin-top:12px;">Periode ini sudah difinalisasi pada ${fmtDate(session.finalizedAt)}. % Stok terhadap Sales: <b>${session.netSales ? (session.totalValue/session.netSales*100).toFixed(2).replace('.',',') : '—'}%</b></div>` :
           `<button class="btn btn-primary" style="margin-top:12px;" onclick="submitFinalizeOpname('${periodKey}')" ${!allDone?'disabled title="Selesaikan opname di semua lokasi dulu"':''}>Selesaikan Periode Ini</button>
            ${!allDone?'<div class="cell-sub" style="margin-top:6px;">Selesaikan opname di semua lokasi dulu sebelum finalisasi.</div>':''}`}
@@ -2849,26 +3079,107 @@ let opnameCounts = {};
 // opname data (allItemsDetail / locationAddedGoodsValues / locationAddedWipValues)
 // and never go through adjustStock, so they can never touch real inventory.
 let opnameAdded = {};
+// Tracks which items the counter has actually typed a physical count for.
+// opnameCounts still defaults every item to its system quantity right away
+// (so the diff/total math and the final submit always have a real number to
+// work with), but until an item is touched its input is shown BLANK rather
+// than pre-filled with that system quantity -- a pre-filled number that
+// already matches "Stok Sistem" looks like it was already counted, which is
+// exactly the confusion that led people to skip actually counting it.
+let opnameTouched = {};
+/* ---------- Draft persistence -----------------------------------------
+   opnameCounts/opnameAdded/opnameTouched above only ever lived in memory,
+   so anything the counter typed vanished the moment the tab reloaded or the
+   session ended -- the "Stok Sistem" figure would then re-populate from
+   whatever the CURRENT live stock is (which may have moved on since), and
+   it looked like the previously-entered selisih had simply disappeared.
+   These functions save that in-progress count to an opnameDrafts doc
+   (locationId+periodKey) so it survives a reload and resumes exactly where
+   it was left, without needing to finish counting in one sitting. */
+function opnameDraftDocId(locationId, periodKey){ return locationId + '__' + periodKey; }
+function findOpnameDraft(locationId, periodKey){ return state.opnameDrafts.find(d=>d.locationId===locationId && d.periodKey===periodKey) || null; }
+let opnameDraftSaveTimer = null;
+function scheduleOpnameDraftSave(){
+  if(opnameDraftSaveTimer) clearTimeout(opnameDraftSaveTimer);
+  opnameDraftSaveTimer = setTimeout(()=>{ opnameDraftSaveTimer = null; saveOpnameDraftNow(true); }, 1500);
+}
+async function saveOpnameDraftNow(silent){
+  const locationId = state.opnameCountLocation;
+  if(!locationId) return;
+  const periodKey = state.opnamePeriod || currentPeriodKey();
+  const statusEl = document.getElementById('opnameDraftStatus');
+  if(statusEl) statusEl.textContent = 'Menyimpan draft…';
+  try{
+    const nowIso = new Date().toISOString();
+    await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).set({
+      locationId, periodKey,
+      counts: {...opnameCounts}, touched: {...opnameTouched}, added: {...opnameAdded},
+      updatedAt: nowIso,
+    });
+    const el = document.getElementById('opnameDraftStatus');
+    if(el) el.textContent = 'Draft tersimpan · ' + fmtTime(nowIso);
+    if(!silent) toast('Draft opname ' + whName(locationId) + ' tersimpan.');
+  }catch(err){
+    const el = document.getElementById('opnameDraftStatus');
+    if(el) el.textContent = 'Gagal menyimpan draft — coba lagi.';
+    if(!silent) toast(err.message || 'Gagal menyimpan draft. Coba lagi.', true);
+  }
+}
+function saveOpnameDraftManual(){
+  if(opnameDraftSaveTimer){ clearTimeout(opnameDraftSaveTimer); opnameDraftSaveTimer = null; }
+  saveOpnameDraftNow(false);
+}
+async function deleteOpnameDraft(locationId, periodKey){
+  try{ await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).delete(); }catch(err){ /* best-effort cleanup */ }
+}
+// Flushes any not-yet-saved edit (the debounce is still pending) before
+// leaving the counting page, so navigating away right after typing doesn't
+// lose the last couple of seconds' worth of counts.
+function backToOpnameList(){
+  if(opnameDraftSaveTimer){ clearTimeout(opnameDraftSaveTimer); opnameDraftSaveTimer = null; saveOpnameDraftNow(true); }
+  goto('stockopname');
+}
 function openOpnameCounting(locationId){
   if(!canManageGudang(currentRole())){ toast('Peran ini tidak dapat melakukan Stock Opname.', true); return; }
   state.opnameCountLocation = locationId;
   opnameCounts = {};
   opnameAdded = {};
+  opnameTouched = {};
   state.items.forEach(item=>{
     const qty = stockQty(locationId, item.id);
     if(qty > 0) opnameCounts[item.id] = srHasSmallUnit(item) ? qty * item.conversionQty : qty;
   });
-  state.opnameSearch = ''; state.opnamePage = 1;
+  const periodKey = state.opnamePeriod || currentPeriodKey();
+  const draft = findOpnameDraft(locationId, periodKey);
+  if(draft){
+    // Overlay the saved draft on top of the live-stock baseline above --
+    // items the counter never got to still fall back to current system
+    // stock (untouched, blank input), exactly like starting fresh would.
+    Object.assign(opnameCounts, draft.counts || {});
+    opnameTouched = {...(draft.touched || {})};
+    opnameAdded = {...(draft.added || {})};
+    toast('Draft opname ' + whName(locationId) + ' dilanjutkan (tersimpan terakhir ' + fmtTime(draft.updatedAt) + ').');
+  }
+  state.opnameSearch = ''; state.opnamePage = 1; state.opnamePeruntukan = ''; state.opnameSort = 'name_asc';
   goto('opname-count');
 }
 function setOpnameSearch(v){ state.opnameSearch = v; state.opnamePage = 1; render(); }
 function setOpnamePage(p){ state.opnamePage = p; render(); }
+function setOpnamePeruntukan(v){ state.opnamePeruntukan = v; state.opnamePage = 1; render(); }
+function setOpnameSort(v){ state.opnameSort = v; state.opnamePage = 1; render(); }
+function resetOpnameFilters(){ state.opnameSearch=''; state.opnamePeruntukan=''; state.opnameSort='name_asc'; state.opnamePage=1; render(); }
+/* Converts a canonical (large-unit) qty into whatever unit this item is being
+   counted/displayed in here -- mirrors opnameSystemDisplay's own conversion,
+   so a Peruntukan breakdown always lines up with the "Stok Sistem" number it
+   explains instead of silently being in a different unit. */
+function opnameDisplayQty(item, canonicalQty){ return srHasSmallUnit(item) ? canonicalQty * item.conversionQty : canonicalQty; }
 function opnameSystemDisplay(locationId, item){
   const system = stockQty(locationId, item.id);
   return srHasSmallUnit(item) ? system * item.conversionQty : system;
 }
 function opnameUpdateCount(itemId, value){
   opnameCounts[itemId] = parseFloat(value) || 0;
+  opnameTouched[itemId] = true;
   const locationId = state.opnameCountLocation;
   const item = itemById(itemId);
   const systemDisplay = opnameSystemDisplay(locationId, item);
@@ -2879,6 +3190,7 @@ function opnameUpdateCount(itemId, value){
     cell.textContent = diff===0 ? '—' : (diff>0?'+':'')+fmtNum(diff);
   }
   opnameUpdateTotals();
+  scheduleOpnameDraftSave();
 }
 function opnameUpdateTotals(){
   const locationId = state.opnameCountLocation;
@@ -2911,34 +3223,66 @@ function renderOpnameCounting(){
   const locationId = state.opnameCountLocation;
   const w = whById(locationId);
   if(!w){ goto('stockopname'); return; }
+  const isStorage = isStorageWarehouse(locationId);
+  if(!isStorage) state.opnamePeruntukan = ''; // Peruntukan only exists at Gudang Utama
   let items = Object.keys(opnameCounts).map(id=>itemById(id)).filter(Boolean);
   if(state.opnameSearch){ const q = state.opnameSearch.toLowerCase(); items = items.filter(i=>(i.name||'').toLowerCase().includes(q) || (i.kode||'').toLowerCase().includes(q)); }
-  items.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  if(isStorage && state.opnamePeruntukan){
+    // Items added manually here (Tambah Barang / Tambah Barang WIP) never had
+    // real stock to begin with, so they have no Peruntukan of their own --
+    // always keep them visible rather than have the filter hide them.
+    items = items.filter(i => opnameAdded.hasOwnProperty(i.id) || stockQtyByPeruntukan(locationId, i.id, state.opnamePeruntukan) > 0);
+  }
+  const opnameSortFns = {
+    name_asc: (a,b)=>(a.name||'').localeCompare(b.name||''),
+    name_desc: (a,b)=>(b.name||'').localeCompare(a.name||''),
+    selisih_desc: (a,b)=>{
+      const da = Math.abs((opnameCounts[a.id]||0) - opnameSystemDisplay(locationId, a));
+      const db = Math.abs((opnameCounts[b.id]||0) - opnameSystemDisplay(locationId, b));
+      return db - da || (a.name||'').localeCompare(b.name||'');
+    },
+  };
+  items.sort(opnameSortFns[state.opnameSort] || opnameSortFns.name_asc);
   const pageSize = 50;
   const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
   if(state.opnamePage > totalPages) state.opnamePage = totalPages;
   if(state.opnamePage < 1) state.opnamePage = 1;
   const pageItems = items.slice((state.opnamePage-1)*pageSize, (state.opnamePage-1)*pageSize + pageSize);
   const wipCategory = wipCategoryFor(locationId);
+  const filtersActive = state.opnameSearch || state.opnamePeruntukan || state.opnameSort!=='name_asc';
+  const periodKeyNow = state.opnamePeriod || currentPeriodKey();
+  const existingDraft = findOpnameDraft(locationId, periodKeyNow);
+  const draftStatusInitial = existingDraft ? ('Draft tersimpan · ' + fmtTime(existingDraft.updatedAt)) : 'Progres hitung belum tersimpan sebagai draft.';
 
   document.getElementById('content').innerHTML = `
-    <div class="action-row"><button class="btn btn-outline" onclick="goto('stockopname')">${ICONS.arrowleft} Kembali ke Stock Opname</button></div>
+    <div class="action-row"><button class="btn btn-outline" onclick="backToOpnameList()">${ICONS.arrowleft} Kembali ke Stock Opname</button></div>
     <div class="panel">
       <div class="panel-head"><h3>Hitung Fisik — ${w.name} <span style="font-weight:600; color:var(--text-secondary); font-size:12px;">(${periodLabel(state.opnamePeriod || currentPeriodKey())})</span></h3><span class="panel-total" id="opnameTotalHint"></span></div>
+      <div class="cell-sub" style="padding:8px 16px 0;" id="opnameDraftStatus">${draftStatusInitial}</div>
+      <div class="lock-note" style="margin:8px 16px 0; border-radius:6px;">Progres hitung di halaman ini otomatis tersimpan sebagai draft. Boleh ditinggal kapan saja (mis. lanjut ke menu lain) — nanti tinggal buka lagi "Lanjutkan Opname" untuk ${w.name} dari menu Stock Opname untuk melanjutkan dari posisi terakhir.</div>
       <div class="filter-row">
-        <input type="text" id="opnameSearchInput" placeholder="Cari barang…" value="${escapeHtml(state.opnameSearch)}" oninput="setOpnameSearch(this.value)">
+        <input type="text" id="opnameSearchInput" style="flex:1; min-width:200px;" placeholder="Cari barang…" value="${escapeHtml(state.opnameSearch)}" oninput="setOpnameSearch(this.value)">
         <button class="btn btn-sm btn-outline" onclick="openAddOpnameItemModal()">${ICONS.plus} Tambah Barang</button>
         ${wipCategory ? `<button class="btn btn-sm btn-outline" onclick="openAddWipModal()">${ICONS.plus} Tambah Barang WIP</button>` : ''}
       </div>
+      <div class="filter-row">
+        ${isStorage ? `<select onchange="setOpnamePeruntukan(this.value)"><option value="">Semua Peruntukan</option>${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}" ${state.opnamePeruntukan===p.id?'selected':''}>${p.name}</option>`).join('')}</select>` : ''}
+        <select onchange="setOpnameSort(this.value)">
+          <option value="name_asc" ${state.opnameSort==='name_asc'?'selected':''}>Nama: A ke Z</option>
+          <option value="name_desc" ${state.opnameSort==='name_desc'?'selected':''}>Nama: Z ke A</option>
+          <option value="selisih_desc" ${state.opnameSort==='selisih_desc'?'selected':''}>Selisih terbesar dulu</option>
+        </select>
+        ${filtersActive ? `<button class="btn btn-sm btn-outline" onclick="resetOpnameFilters()">Reset</button>` : ''}
+      </div>
       <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang yang ditambahkan manual lewat "Tambah Barang"/"Tambah Barang WIP" (ditandai "Tambahan"/"WIP") hanya tercatat di data Stock Opname — tidak memengaruhi stok/inventory yang sebenarnya.</div>
       ${wipCategory ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang WIP (${escapeHtml(wipCategory)}) tidak pernah masuk lewat Penerimaan Barang — tambahkan manual di sini kalau ada yang mau dihitung.</div>` : ''}
-      ${isStorageWarehouse(locationId) ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Selisih hasil hitung di sini dibebankan ke Mix Use, karena opname tidak tahu selisih itu milik alokasi divisi yang mana.</div>` : ''}
+      ${isStorage ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Selisih hasil hitung di sini dibebankan ke Mix Use, karena opname tidak tahu selisih itu milik alokasi divisi yang mana.</div>` : ''}
       <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Barang yang punya konversi Satuan Kecil dihitung langsung dalam satuan kecil untuk akurasi maksimal.</div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Barang</th><th>Satuan Hitung</th><th class="num">Stok Sistem</th><th class="num">Jumlah Fisik</th><th class="num">Selisih</th></tr></thead>
+          <thead><tr><th>Barang</th>${isStorage?'<th>Peruntukan</th>':''}<th>Satuan Hitung</th><th class="num">Stok Sistem</th><th class="num">Jumlah Fisik</th><th class="num">Selisih</th></tr></thead>
           <tbody>
-            ${pageItems.length===0 ? `<tr class="empty-row"><td colspan="5">Tidak ada barang yang cocok.</td></tr>` :
+            ${pageItems.length===0 ? `<tr class="empty-row"><td colspan="${isStorage?6:5}">Tidak ada barang yang cocok.</td></tr>` :
               pageItems.map(item=>{
                 const useSmall = srHasSmallUnit(item);
                 const countUnit = useSmall ? item.smallUnit : item.uom;
@@ -2948,11 +3292,15 @@ function renderOpnameCounting(){
                 const diffColor = diff===0 ? 'var(--text-faint)' : (diff>0 ? 'var(--success)' : 'var(--danger)');
                 const isWip = item.category === wipCategory;
                 const isAdded = opnameAdded.hasOwnProperty(item.id);
+                const touched = opnameTouched[item.id] || isAdded;
+                const peruntukanParts = (isStorage && !isAdded) ? PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(locationId, item.id, p.id)})).filter(p=>p.qty>0) : [];
+                const peruntukanLabel = peruntukanParts.length ? peruntukanParts.map(p=>escapeHtml(p.name)+' '+fmtNum(opnameDisplayQty(item,p.qty))).join(' · ') : '—';
                 return `<tr>
                   <td class="cell-title">${escapeHtml(item.name)}${isWip?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">WIP</span>':''}${(!isWip && isAdded)?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">Tambahan</span>':''}</td>
+                  ${isStorage?`<td>${peruntukanLabel}</td>`:''}
                   <td>${escapeHtml(countUnit||'')}${useSmall ? `<div class="cell-sub">1 ${escapeHtml(item.uom)} = ${fmtNum(item.conversionQty)} ${escapeHtml(item.smallUnit)}</div>` : ''}</td>
                   <td class="num">${fmtNum(systemDisplay)}</td>
-                  <td class="num"><input type="number" style="width:96px; text-align:right;" value="${counted}" oninput="opnameUpdateCount('${item.id}', this.value)"></td>
+                  <td class="num"><input type="number" style="width:96px; text-align:right;" value="${touched ? counted : ''}" placeholder="0" oninput="opnameUpdateCount('${item.id}', this.value)"></td>
                   <td class="num" id="opnameDiff-${item.id}" style="color:${diffColor}; font-weight:700;">${diff===0?'—':(diff>0?'+':'')+fmtNum(diff)}</td>
                 </tr>`;
               }).join('')}
@@ -2961,7 +3309,10 @@ function renderOpnameCounting(){
       </div>
       ${paginationHtml(state.opnamePage, totalPages, items.length, pageSize, 'setOpnamePage', 'barang')}
     </div>
-    <div class="action-row"><button class="btn btn-primary" id="opnameSubmitBtn" onclick="submitOpnameCounting()">Simpan Hasil Opname ${w.name}</button></div>
+    <div class="action-row" style="justify-content:flex-end; gap:8px;">
+      <button class="btn btn-outline" onclick="saveOpnameDraftManual()">Simpan Draft</button>
+      <button class="btn btn-primary" id="opnameSubmitBtn" onclick="submitOpnameCounting()">Simpan Hasil Opname ${w.name}</button>
+    </div>
   `;
   opnameUpdateTotals();
 }
@@ -3003,6 +3354,7 @@ function submitAddWip(){
   opnameAdded[itemId] = 'wip';
   closeModal();
   renderOpnameCounting();
+  scheduleOpnameDraftSave();
   toast('Barang WIP ditambahkan ke daftar hitung (tercatat di opname, tidak memengaruhi stok).');
 }
 function openAddOpnameItemModal(){
@@ -3047,6 +3399,7 @@ function submitAddOpnameItem(){
   opnameAdded[itemId] = (wipCategory && item.category===wipCategory) ? 'wip' : 'goods';
   closeModal();
   renderOpnameCounting();
+  scheduleOpnameDraftSave();
   toast('Barang ditambahkan ke daftar hitung (tercatat di opname, tidak memengaruhi stok).');
 }
 async function submitOpnameCounting(){
@@ -3056,6 +3409,10 @@ async function submitOpnameCounting(){
   if(btn){ if(btn.disabled) return; btn.disabled = true; }
   showLoading('Menyimpan hasil opname…');
   const ok = await actionSubmitOpnameCount(locationId, {...opnameCounts}, periodKey, {...opnameAdded});
+  if(ok){
+    if(opnameDraftSaveTimer){ clearTimeout(opnameDraftSaveTimer); opnameDraftSaveTimer = null; }
+    await deleteOpnameDraft(locationId, periodKey); // finalized -- the draft's job is done
+  }
   hideLoading();
   if(ok){ goto('stockopname'); }
   else if(btn){ btn.disabled = false; }
@@ -3327,6 +3684,84 @@ function renderStoreRequests(){
     </div>
   `;
 }
+/* --- Permintaan WIP (logbook only, see actionWipRequestDoc) --- */
+function setWipTab(t){ state.wipTab = t; state.wipPage = 1; render(); }
+function setWipPage(p){ state.wipPage = p; render(); }
+function setWipSearch(v){ state.wipSearch = v; state.wipPage = 1; render(); }
+function setWipDateFrom(v){ state.wipDateFrom = v; state.wipPage = 1; render(); }
+function setWipDateTo(v){ state.wipDateTo = v; state.wipPage = 1; render(); }
+function resetWipFilters(){ state.wipSearch=''; state.wipDateFrom=''; state.wipDateTo=''; state.wipPage=1; render(); }
+function renderWipRequests(){
+  const role = currentRole();
+  const all = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  const tabs = [{id:'menunggu', label:'Menunggu'},{id:'disetujui', label:'Disetujui'},{id:'ditolak', label:'Ditolak'},{id:'all', label:'Semua'}];
+  let docs = state.wipTab==='all' ? all : all.filter(d=>d.lines[0].status===state.wipTab);
+  if(state.wipSearch){
+    const q = state.wipSearch.toLowerCase();
+    docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q) || (d.lines[0].createdBy||'').toLowerCase().includes(q));
+  }
+  docs = docs.filter(d => inDateRange(d.createdAt, state.wipDateFrom, state.wipDateTo));
+  const canApprove = canApproveSR(role), canCreate = canCreateWipRequest(role);
+  const pageSize = state.wipPageSize;
+  const totalPages = Math.max(1, Math.ceil(docs.length / pageSize));
+  if(state.wipPage > totalPages) state.wipPage = totalPages;
+  if(state.wipPage < 1) state.wipPage = 1;
+  const pageDocs = docs.slice((state.wipPage-1)*pageSize, (state.wipPage-1)*pageSize + pageSize);
+
+  document.getElementById('content').innerHTML = `
+    <div class="lock-note">Permintaan WIP adalah catatan serah-terima WIP antar divisi kitchen — murni untuk melacak berapa kali WIP diminta/diserahkan. Tidak memengaruhi stok/inventory maupun Stock Opname sama sekali.</div>
+    <div class="action-row">
+      ${canCreate ? `<button class="btn btn-primary" onclick="openWipRequestModal()">${ICONS.plus} Permintaan WIP Baru</button>` : ''}
+    </div>
+    <div class="panel">
+      <div class="filter-row" style="border-bottom:1px solid var(--border);">
+        ${tabs.map(t=>`<button class="tab-btn ${state.wipTab===t.id?'active':''}" onclick="setWipTab('${t.id}')">${t.label}${t.id==='menunggu'&&pendingWipCount()>0?' ('+pendingWipCount()+')':''}</button>`).join('')}
+      </div>
+      <div class="filter-row">
+        ${searchDateFilterHtml({placeholder:'Cari No. Permintaan, barang, atau divisi…', search:state.wipSearch, dateFrom:state.wipDateFrom, dateTo:state.wipDateTo, onSearch:'setWipSearch', onDateFrom:'setWipDateFrom', onDateTo:'setWipDateTo', onReset:'resetWipFilters'})}
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>No. Permintaan</th><th>Tanggal</th><th>Divisi</th><th>Jumlah Barang</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="6">Tidak ada Permintaan WIP yang cocok.</td></tr>` :
+              pageDocs.map(d=>{
+                const first = d.lines[0];
+                return `<tr class="clickable" onclick="openWipDetail('${d.docNumber}')">
+                  <td class="code-mono">${d.docNumber}</td>
+                  <td>${fmtDate(d.createdAt)}</td>
+                  <td class="cell-title">${escapeHtml(first.divisionName||'—')}</td>
+                  <td>${d.lines.length} barang</td>
+                  <td>${wipStatusTag(first)}</td>
+                  <td>${(function(){
+                    const isPending = first.status==='menunggu';
+                    const gatePending = isWipGatePending(first);
+                    if(isPending && gatePending && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId)){
+                      return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
+                        <button class="btn btn-sm btn-approve" onclick="confirmApproveWipGate('${d.docNumber}')">Setujui</button>
+                        <button class="btn btn-sm btn-danger-outline" onclick="openRejectWipModal('${d.docNumber}')">Tolak</button>
+                      </div>`;
+                    }
+                    if(isPending && !gatePending && canApprove){
+                      return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
+                        <button class="btn btn-sm btn-approve" onclick="confirmApproveWip('${d.docNumber}')">Catat Selesai</button>
+                        <button class="btn btn-sm btn-danger-outline" onclick="openRejectWipModal('${d.docNumber}')">Tolak</button>
+                      </div>`;
+                    }
+                    if(isPending && canDeleteWip(role, first)){
+                      return `<div onclick="event.stopPropagation()"><button class="btn btn-sm btn-danger-outline" onclick="confirmDeleteWip('${d.docNumber}')">Hapus</button></div>`;
+                    }
+                    return '';
+                  })()}</td>
+                </tr>`;
+              }).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${paginationHtml(state.wipPage, totalPages, docs.length, pageSize, 'setWipPage', 'permintaan')}
+    </div>
+  `;
+}
 function openReceivingDetail(docNumber){
   const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(lines.length===0) return;
@@ -3496,6 +3931,41 @@ async function submitEditSr(docNumber, isLeaderEdit){
   await submitGuarded(err, async ()=>{ await actionEditStoreRequestDoc(docNumber, lines, noteFields); });
 }
 
+function openWipDetail(docNumber){
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(lines.length===0) return;
+  const role = currentRole();
+  const first = lines[0];
+  if(!canSeeSRForDivision(role, first.divisionId)){ toast('Anda tidak dapat melihat permintaan ini.', true); return; }
+  const body = `
+    <div class="lock-note">Divisi <b>${escapeHtml(first.divisionName||'—')}</b> · ${fmtDate(first.createdAt)}</div>
+    <div class="table-scroll" style="border:1px solid var(--border); border-radius:8px;">
+      <table><thead><tr><th>Barang</th><th class="num">Jumlah</th></tr></thead>
+      <tbody>${lines.map(l=>{
+        const primary = l.requestedUnit ? (fmtNum(l.requestedQty) + ' ' + escapeHtml(l.requestedUnit)) : (fmtNum(l.qty) + ' ' + escapeHtml(l.uom||''));
+        const sub = l.requestedUnit ? `<div class="cell-sub">≈ ${fmtNum(l.qty)} ${escapeHtml(l.uom||'')}</div>` : '';
+        const requesterNote = l.note ? `<div class="cell-sub">Catatan: ${escapeHtml(l.note)}</div>` : '';
+        return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}</td><td class="num">${primary}${sub}</td></tr>`;
+      }).join('')}</tbody></table>
+    </div>
+    <div style="margin-top:12px;">Status: ${wipStatusTag(first)}</div>
+    ${first.status==='ditolak' && first.rejectNote ? `<div class="cell-sub" style="margin-top:6px;">Alasan penolakan: ${escapeHtml(first.rejectNote)}</div>` : ''}
+    ${isWipGatePending(first) && canApproveSR(role) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
+    <div class="cell-sub" style="margin-top:10px;">Catatan: Permintaan WIP murni logbook — tidak memengaruhi stok/inventory maupun Stock Opname.</div>
+  `;
+  const canApprove = canApproveSR(role);
+  const canGate = canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId);
+  const gatePending = isWipGatePending(first);
+  let foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
+  if(canDeleteWip(role, first)) foot += `<button class="btn btn-danger-outline" onclick="closeModal(); confirmDeleteWip('${docNumber}')">Hapus</button>`;
+  if(first.status==='menunggu' && gatePending && canGate){
+    foot += `<button class="btn btn-danger-outline" onclick="closeModal(); openRejectWipModal('${docNumber}')">Tolak</button><button class="btn btn-primary" onclick="closeModal(); confirmApproveWipGate('${docNumber}')">Setujui</button>`;
+  } else if(first.status==='menunggu' && !gatePending && canApprove){
+    foot += `<button class="btn btn-danger-outline" onclick="closeModal(); openRejectWipModal('${docNumber}')">Tolak</button><button class="btn btn-primary" onclick="closeModal(); confirmApproveWip('${docNumber}')">Catat Selesai</button>`;
+  }
+  openModal('Permintaan WIP ' + docNumber, body, foot);
+}
+
 /* =========================================================
    PENERIMAAN BARANG (Receiving)
 ========================================================= */
@@ -3507,6 +3977,7 @@ function setReceivingPage(p){ state.receivingPage = p; render(); }
 function renderReceiving(){
   const role = currentRole();
   const canR = canReceive(role);
+  const canEditR = canEditMaster(role);
   let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
   if(state.receivingSearch){
     const q = state.receivingSearch.toLowerCase();
@@ -3542,8 +4013,16 @@ function renderReceiving(){
                 return `
                 <tr class="clickable" style="background:var(--surface-2);" onclick="openReceivingDetail('${d.docNumber}')">
                   <td colspan="6">
-                    <b class="code-mono">${d.docNumber}</b>${first.attachmentId?` <span class="attachment-badge" title="Ada lampiran PDF">${ICONS.paperclip}</span>`:''}
-                    <span class="cell-sub" style="margin-left:8px;">${fmtDate(d.createdAt)} · ${escapeHtml(first.supplierName||'Tanpa Supplier')}${first.doNumber?' · DO '+escapeHtml(first.doNumber):''}</span>
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
+                      <div>
+                        <b class="code-mono">${d.docNumber}</b>${first.attachmentId?` <span class="attachment-badge" title="Ada lampiran PDF">${ICONS.paperclip}</span>`:''}
+                        <span class="cell-sub" style="margin-left:8px;">${fmtDate(d.createdAt)} · ${escapeHtml(first.supplierName||'Tanpa Supplier')}${first.doNumber?' · DO '+escapeHtml(first.doNumber):''}</span>
+                      </div>
+                      ${canEditR ? `<div style="display:flex; gap:6px; flex-shrink:0;" onclick="event.stopPropagation()">
+                        <button class="icon-btn" title="Edit" onclick="openReceivingModal('${d.docNumber}')">${ICONS.edit}</button>
+                        <button class="icon-btn icon-btn-danger" title="Hapus" onclick="confirmDeleteReceiving('${d.docNumber}')">${ICONS.trash}</button>
+                      </div>` : ''}
+                    </div>
                   </td>
                 </tr>
                 ${d.lines.map(l=>`<tr>
@@ -4180,14 +4659,14 @@ function renderSuppliers(){
           <thead><tr><th>Kode</th><th>Nama Supplier</th><th>Contact Person</th><th>No. Telepon</th><th>Alamat</th><th>Status</th>${editable?'<th></th>':''}</tr></thead>
           <tbody>
             ${pageRows.length===0 ? `<tr class="empty-row"><td colspan="7">${(state.suppliers||[]).length===0?'Belum ada supplier.':'Tidak ada supplier yang cocok dengan filter.'}</td></tr>` :
-              pageRows.map(s=>`<tr>
+              pageRows.map(s=>`<tr class="clickable" onclick='openSupplierDetail(${JSON.stringify(s.id)})'>
                 <td class="code-mono">${escapeHtml(s.kode||'—')}</td>
                 <td class="cell-title">${escapeHtml(s.name)}</td>
                 <td>${escapeHtml(s.contact||'—')}</td>
                 <td>${escapeHtml(s.phone||'—')}</td>
                 <td>${escapeHtml(s.address||'—')}</td>
                 <td><span class="tag ${s.status==='Nonaktif'?'tag-neutral':'tag-approved'}">${escapeHtml(s.status||'Aktif')}</span></td>
-                ${editable?`<td><button class="btn btn-sm btn-outline" onclick='openSupplierModal(${JSON.stringify(s.id)})'>Edit</button></td>`:''}
+                ${editable?`<td onclick="event.stopPropagation()"><button class="btn btn-sm btn-outline" onclick='openSupplierModal(${JSON.stringify(s.id)})'>Edit</button></td>`:''}
               </tr>`).join('')}
           </tbody>
         </table>
@@ -4195,6 +4674,34 @@ function renderSuppliers(){
       ${paginationHtml(state.supplierPage, totalPages, filtered.length, pageSize, 'setSupplierPage', 'supplier')}
     </div>
   `;
+}
+function openSupplierDetail(supplierId){
+  const s = (state.suppliers||[]).find(x=>x.id===supplierId);
+  if(!s) return;
+  const editable = canEditSuppliers(currentRole());
+  const docs = groupByDocNumber((state.transactions||[]).filter(t=>t.type==='in' && t.supplierId===s.id));
+  const totalValue = docs.reduce((sum,d)=>sum + d.lines.reduce((s2,l)=>s2+(l.totalValue||0),0), 0);
+  const body = `
+    <div class="two-col">
+      <div class="field"><label>Kode Supplier</label><div class="cell-title">${escapeHtml(s.kode||'—')}</div></div>
+      <div class="field"><label>Status</label><div><span class="tag ${s.status==='Nonaktif'?'tag-neutral':'tag-approved'}">${escapeHtml(s.status||'Aktif')}</span></div></div>
+    </div>
+    <div class="two-col">
+      <div class="field"><label>Contact Person</label><div class="cell-title">${escapeHtml(s.contact||'—')}</div></div>
+      <div class="field"><label>No. Telepon</label><div class="cell-title">${escapeHtml(s.phone||'—')}</div></div>
+    </div>
+    <div class="field"><label>Alamat</label><div class="cell-title">${escapeHtml(s.address||'—')}</div></div>
+    <div class="two-col">
+      <div class="field"><label>Bank</label><div class="cell-title">${escapeHtml(s.bank||'—')}</div></div>
+      <div class="field"><label>No. Rekening</label><div class="cell-title">${escapeHtml(s.accountNumber||'—')}</div></div>
+    </div>
+    <div class="field"><label>TOP (Term of Payment)</label><div class="cell-title">${escapeHtml(s.top||'—')}</div></div>
+    <div class="lock-note" style="margin:14px 0 0;">${docs.length} dokumen penerimaan tercatat dari supplier ini${docs.length?' · total ' + fmtIDR(totalValue):''}.</div>
+  `;
+  const foot = editable
+    ? `<button class="btn btn-outline" onclick="closeModal()">Tutup</button><button class="btn btn-primary" onclick="closeModal(); openSupplierModal('${s.id}')">Edit</button>`
+    : `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
+  openModal(s.name, body, foot);
 }
 function openSupplierModal(supplierId){
   const s = supplierId ? (state.suppliers||[]).find(x=>x.id===supplierId) : null;
@@ -4507,14 +5014,31 @@ async function loadHistOpnameDetail(periodKey){
   state.reportOpname.loadingHist = false;
   render();
 }
+/* Report 2/3 (Nilai Penggunaan per Divisi, Food & Beverage Cost) share the
+   same "Periode" state and, like Report 1, are reports of locked data --
+   so the dropdown only ever lists periods with a finalized Stock Opname,
+   never the running (unlocked) current month or months with no data. */
+function finalizedOpnamePeriodOptions(){
+  return state.opnameSessions.filter(s=>s.status==='selesai').map(s=>s.periodKey).sort();
+}
+function correctReportOpnamePeriod(){
+  const finalizedPeriods = finalizedOpnamePeriodOptions();
+  if(!state.reportOpname.period || !finalizedPeriods.includes(state.reportOpname.period)){
+    state.reportOpname.period = finalizedPeriods.length ? finalizedPeriods[finalizedPeriods.length-1] : '';
+  }
+  return finalizedPeriods;
+}
 function setReportOpnameTab(t){
   state.reportOpname.tab = t;
-  if((t==='r2'||t==='r3') && !state.reportOpname.purchaseCache[state.reportOpname.period] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(state.reportOpname.period);
+  if(t==='r2'||t==='r3'){
+    correctReportOpnamePeriod();
+    if(state.reportOpname.period && !state.reportOpname.purchaseCache[state.reportOpname.period] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(state.reportOpname.period);
+  }
   render();
 }
 function setReportOpnameAsOf(v){
   state.reportOpname.asOf = v;
-  if(v!=='live' && !state.reportOpname.histCache[v] && !state.reportOpname.loadingHist) loadHistOpnameDetail(v);
+  if(!state.reportOpname.histCache[v] && !state.reportOpname.loadingHist) loadHistOpnameDetail(v);
   render();
 }
 function setReportOpnamePeriod(v){
@@ -4588,10 +5112,19 @@ function setReport1Sort(field){
   render();
 }
 function setReport1Search(v){ state.reportOpname.r1Search = v; render(); }
+function setReport1Category(v){ state.reportOpname.r1Category = v; render(); }
+function setReport1Location(v){ state.reportOpname.r1Location = v; render(); }
+function resetReport1Filters(){ state.reportOpname.r1Search=''; state.reportOpname.r1Category=''; state.reportOpname.r1Location=''; render(); }
 function filterReport1Groups(groups){
   const q = (state.reportOpname.r1Search||'').trim().toLowerCase();
-  if(!q) return groups;
-  return groups.map(g=>({ ...g, rows: g.rows.filter(r=>(r.name||'').toLowerCase().includes(q) || (r.category||'').toLowerCase().includes(q) || (r.penyimpanan||'').toLowerCase().includes(q)) }))
+  const category = state.reportOpname.r1Category||'';
+  const location = state.reportOpname.r1Location||'';
+  if(!q && !category && !location) return groups;
+  return groups.map(g=>({ ...g, rows: g.rows.filter(r=>
+      (!q || (r.name||'').toLowerCase().includes(q) || (r.category||'').toLowerCase().includes(q) || (r.penyimpanan||'').toLowerCase().includes(q))
+      && (!category || r.category===category)
+      && (!location || r.penyimpanan===location)
+    ) }))
     .filter(g=>g.rows.length>0)
     .map(g=>({ ...g, subtotal: g.rows.reduce((s,r)=>s+r.jumlah,0) }));
 }
@@ -4629,45 +5162,72 @@ function historicalReport1Groups(periodKey){
   return buildOpnameReport1Groups(direct, storage);
 }
 function reportOpnameR1Html(){
-  const asOf = state.reportOpname.asOf;
+  // This is a report of LOCKED data, not a live view -- so unlike the running
+  // Stock Opname page, there's no "Stok Saat Ini (Live)" option here. It only
+  // ever lists periods that have already been finalized (net sales entered
+  // and locked), and defaults to the most recently finalized one.
   const finalizedSessions = state.opnameSessions.filter(s=>s.status==='selesai').sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
-  let groups = null, ready = true, asOfLabel;
-  if(asOf==='live'){
-    groups = liveReport1Groups();
-    asOfLabel = 'Stok Saat Ini';
+  if(!state.reportOpname.asOf || state.reportOpname.asOf==='live' || !finalizedSessions.some(s=>s.periodKey===state.reportOpname.asOf)){
+    state.reportOpname.asOf = finalizedSessions.length ? finalizedSessions[finalizedSessions.length-1].periodKey : '';
+  }
+  const asOf = state.reportOpname.asOf;
+  let groups = null, ready = true, asOfLabel = '';
+  if(!asOf){
+    ready = false;
   } else {
-    asOfLabel = 'Snapshot Opname ' + periodLabel(asOf);
-    if(!state.reportOpname.histCache[asOf]){ ready = false; }
-    else groups = historicalReport1Groups(asOf);
+    asOfLabel = 'Stok Opname ' + periodLabel(asOf);
+    if(!state.reportOpname.histCache[asOf]){
+      ready = false;
+      if(!state.reportOpname.loadingHist) loadHistOpnameDetail(asOf);
+    } else {
+      groups = historicalReport1Groups(asOf);
+    }
   }
   if(ready && groups){ groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) })); }
   const grandTotal = (ready && groups) ? groups.reduce((s,g)=>s+g.subtotal,0) : 0;
-  const selector = `
+  const selector = finalizedSessions.length ? `
     <div class="field" style="margin:0; max-width:320px; flex:1; min-width:220px;">
       <label>Per Tanggal (As Of)</label>
       <select onchange="setReportOpnameAsOf(this.value)">
-        <option value="live" ${asOf==='live'?'selected':''}>Stok Saat Ini (Live)</option>
-        ${finalizedSessions.map(s=>`<option value="${s.periodKey}" ${asOf===s.periodKey?'selected':''}>Snapshot Opname ${periodLabel(s.periodKey)}</option>`).join('')}
+        ${finalizedSessions.map(s=>`<option value="${s.periodKey}" ${asOf===s.periodKey?'selected':''}>Stok Opname ${periodLabel(s.periodKey)}</option>`).join('')}
       </select>
-    </div>`;
+    </div>` : '';
   const sort = state.reportOpname.r1Sort || {field:'default', dir:'asc'};
-  const sortArrow = field => sort.field===field ? (sort.dir==='asc' ? ' ▲' : ' ▼') : '';
+  const sortArrow = field => sort.field===field
+    ? ` <span class="sort-arrow active">${sort.dir==='asc' ? '▲' : '▼'}</span>`
+    : ` <span class="sort-arrow">⇅</span>`;
   const sortTh = (label, field, numClass) => `<th class="${numClass||''}" style="cursor:pointer; user-select:none;" onclick="setReport1Sort('${field}')" title="Urutkan berdasarkan ${escapeHtml(label)}">${escapeHtml(label)}${sortArrow(field)}</th>`;
   return `
     <div class="panel">
       <div class="panel-head">
-        <h3>Stock Opname — ${escapeHtml(asOfLabel)}</h3>
+        <h3>Stock Opname${asOfLabel ? ' — ' + escapeHtml(asOfLabel) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           Total: <b>${fmtIDR(grandTotal)}</b>
           ${(ready && groups && groups.length) ? `<button class="btn btn-sm btn-outline" onclick="exportReport1Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport1Pdf()">${ICONS.download} PDF</button>` : ''}
         </span>
       </div>
-      <div class="panel-body" style="padding:12px 16px; display:flex; gap:14px; flex-wrap:wrap;">
+      ${finalizedSessions.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
+      <div class="panel-body" style="padding:12px 16px; display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end;">
         ${selector}
         <div class="field" style="margin:0; max-width:320px; flex:1; min-width:220px;">
           <label>Cari</label>
           <input type="text" id="report1SearchInput" placeholder="Cari barang, kategori, atau penyimpanan…" value="${escapeHtml(state.reportOpname.r1Search||'')}" oninput="setReport1Search(this.value)">
         </div>
+        <div class="field" style="margin:0; max-width:220px; flex:1; min-width:170px;">
+          <label>Jenis Bahan Baku</label>
+          <select onchange="setReport1Category(this.value)">
+            <option value="">Semua Jenis</option>
+            ${ITEM_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${state.reportOpname.r1Category===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="margin:0; max-width:220px; flex:1; min-width:170px;">
+          <label>Penyimpanan</label>
+          <select onchange="setReport1Location(this.value)">
+            <option value="">Semua Penyimpanan</option>
+            ${WAREHOUSES.map(w=>`<option value="${escapeHtml(w.name)}" ${state.reportOpname.r1Location===w.name?'selected':''}>${escapeHtml(w.name)}</option>`).join('')}
+          </select>
+        </div>
+        ${(state.reportOpname.r1Search || state.reportOpname.r1Category || state.reportOpname.r1Location) ? `<button class="btn btn-sm btn-outline" onclick="resetReport1Filters()">Reset Filter</button>` : ''}
       </div>
       ${!ready ? `<div class="empty-row" style="padding:22px 16px;">Memuat data snapshot…</div>` :
         (!groups || groups.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Tidak ada data stok yang cocok.</div>` : `
@@ -4697,6 +5257,7 @@ function reportOpnameR1Html(){
           </tbody>
         </table>
       </div>`)}
+      `}
     </div>
   `;
 }
@@ -4706,7 +5267,7 @@ async function exportReport1Excel(){
   let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
   if(!groups){ toast('Data belum siap, coba lagi sebentar.', true); return; }
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Snapshot Opname ' + periodLabel(asOf));
+  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Stock Opname — ' + asOfLabel],
@@ -4741,7 +5302,7 @@ async function exportReport1Pdf(){
   let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
   if(!groups){ toast('Data belum siap, coba lagi sebentar.', true); return; }
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Snapshot Opname ' + periodLabel(asOf));
+  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
   showLoading('Menyiapkan laporan PDF…');
   try{
     const { jsPDF } = window.jspdf;
@@ -4803,10 +5364,11 @@ function report2Rows(periodKey){
   });
 }
 function reportOpnameR2Html(){
+  const finalizedPeriods = correctReportOpnamePeriod();
   const periodKey = state.reportOpname.period;
-  if(!state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
-  const rows = report2Rows(periodKey);
-  const purchaseReady = !!state.reportOpname.purchaseCache[periodKey];
+  if(periodKey && !state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
+  const rows = periodKey ? report2Rows(periodKey) : [];
+  const purchaseReady = !!(periodKey && state.reportOpname.purchaseCache[periodKey]);
   const grand = rows.reduce((acc,r)=>{
     acc.opening += r.opening||0; acc.purchase += r.purchase||0; acc.closing += r.closing||0;
     if(r.usage!=null) acc.usage += r.usage; else acc.incomplete = true;
@@ -4815,17 +5377,18 @@ function reportOpnameR2Html(){
   const periodSelector = `
     <div class="field" style="margin:0; max-width:280px;">
       <label>Periode</label>
-      <select onchange="setReportOpnamePeriod(this.value)">${opnamePeriodOptions().map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
+      <select onchange="setReportOpnamePeriod(this.value)">${finalizedPeriods.map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
     </div>`;
   return `
     <div class="panel">
       <div class="panel-head">
-        <h3>Nilai Penggunaan per Divisi — ${escapeHtml(periodLabel(periodKey))}</h3>
+        <h3>Nilai Penggunaan per Divisi${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           Total Usage: <b>${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
           ${purchaseReady ? `<button class="btn btn-sm btn-outline" onclick="exportReport2Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport2Pdf()">${ICONS.download} PDF</button>` : ''}
         </span>
       </div>
+      ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
       <div class="panel-body" style="padding:12px 16px;">${periodSelector}</div>
       ${!purchaseReady ? `<div class="empty-row" style="padding:22px 16px;">Memuat data pembelian periode ini…</div>` : `
       <div class="table-scroll">
@@ -4844,6 +5407,7 @@ function reportOpnameR2Html(){
         </table>
       </div>
       <div class="lock-note">Opening Inventory = Closing Inventory periode sebelumnya (snapshot Stock Opname yang sudah difinalisasi). Jika periode sebelumnya belum pernah difinalisasi, Opening tampil "belum ada data" dan Inventory Usage tidak dihitung — bukan diasumsikan 0.</div>
+      `}
       `}
     </div>
   `;
@@ -4920,24 +5484,26 @@ function report3Rows(periodKey){
   ];
 }
 function reportOpnameR3Html(){
+  const finalizedPeriods = correctReportOpnamePeriod();
   const periodKey = state.reportOpname.period;
-  if(!state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
-  const purchaseReady = !!state.reportOpname.purchaseCache[periodKey];
-  const ns = monthlyNetSalesFor(periodKey);
-  const rows = report3Rows(periodKey);
+  if(periodKey && !state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
+  const purchaseReady = !!(periodKey && state.reportOpname.purchaseCache[periodKey]);
+  const ns = periodKey ? monthlyNetSalesFor(periodKey) : null;
+  const rows = periodKey ? report3Rows(periodKey) : [];
   const periodSelector = `
     <div class="field" style="margin:0; max-width:280px;">
       <label>Periode</label>
-      <select onchange="setReportOpnamePeriod(this.value)">${opnamePeriodOptions().map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
+      <select onchange="setReportOpnamePeriod(this.value)">${finalizedPeriods.map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
     </div>`;
   return `
     <div class="panel">
       <div class="panel-head">
-        <h3>Food &amp; Beverage Cost — ${escapeHtml(periodLabel(periodKey))}</h3>
+        <h3>Food &amp; Beverage Cost${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px;">
           ${purchaseReady ? `<button class="btn btn-sm btn-outline" onclick="exportReport3Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport3Pdf()">${ICONS.download} PDF</button>` : ''}
         </span>
       </div>
+      ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
       <div class="panel-body" style="padding:12px 16px;">${periodSelector}</div>
       <div class="panel-body" style="padding:4px 16px 16px;">
         <div class="cell-sub" style="margin-bottom:8px;">Net Sales diisi manual dari data POS (Raptor) — belum ada integrasi otomatis.</div>
@@ -4962,6 +5528,7 @@ function reportOpnameR3Html(){
         </table>
       </div>
       <div class="lock-note">Actual Cost = Purchase (barang masuk) untuk Kitchen / Bar pada periode ini (sama dengan kolom Purchase di Nilai Penggunaan per Divisi). Actual COGS % tidak dihitung selama Net Sales belum diisi — tidak ditampilkan sebagai 0%.</div>
+      `}
       `}
     </div>
   `;
@@ -5229,6 +5796,106 @@ function renderReportKeluar(){
 }
 
 /* =========================================================
+   LAPORAN PENCATATAN WIP -- rekap frekuensi Permintaan WIP
+   Hanya menghitung dokumen berstatus 'disetujui' (baru "tercatat" setelah
+   lolos Kitchen Leader + Receiving, lihat actionApproveWip). Murni bacaan
+   dari transactions type:'wiprequest' -- tidak pernah menyentuh
+   stock/opname, sama seperti fitur Permintaan WIP itu sendiri.
+========================================================= */
+function setReportWipSearch(v){ state.reportWipSearch = v; state.reportWipPage = 1; render(); }
+function setReportWipDateFrom(v){ state.reportWipDateFrom = v; state.reportWipPage = 1; render(); }
+function setReportWipDateTo(v){ state.reportWipDateTo = v; state.reportWipPage = 1; render(); }
+function setReportWipPage(p){ state.reportWipPage = p; render(); }
+function resetReportWipFilters(){ state.reportWipSearch=''; state.reportWipDateFrom=''; state.reportWipDateTo=''; state.reportWipPage=1; render(); }
+function renderReportWip(){
+  const role = currentRole();
+  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  if(state.reportWipSearch){
+    const q = state.reportWipSearch.toLowerCase();
+    docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q));
+  }
+  docs = docs.filter(d => inDateRange(d.createdAt, state.reportWipDateFrom, state.reportWipDateTo));
+
+  const itemStats = {}, divisiStats = {};
+  docs.forEach(d=>{
+    const first = d.lines[0];
+    const dv = divisiStats[first.divisionId] || (divisiStats[first.divisionId] = {name:first.divisionName||'—', count:0});
+    dv.count += 1;
+    d.lines.forEach(l=>{
+      const it = itemStats[l.itemId] || (itemStats[l.itemId] = {name:l.itemName, uom:l.uom, count:0, qty:0});
+      it.count += 1;
+      it.qty += (l.qty||0);
+    });
+  });
+  const itemRows = Object.values(itemStats).sort((a,b)=>b.count-a.count);
+  const divisiRows = Object.values(divisiStats).sort((a,b)=>b.count-a.count);
+  const maxItemCount = Math.max(1, ...itemRows.map(r=>r.count));
+  const maxDivisiCount = Math.max(1, ...divisiRows.map(r=>r.count));
+
+  const pageSize = state.reportWipPageSize;
+  const totalPages = Math.max(1, Math.ceil(docs.length / pageSize));
+  if(state.reportWipPage > totalPages) state.reportWipPage = totalPages;
+  if(state.reportWipPage < 1) state.reportWipPage = 1;
+  const pageDocs = docs.slice((state.reportWipPage-1)*pageSize, (state.reportWipPage-1)*pageSize + pageSize);
+
+  document.getElementById('content').innerHTML = `
+    <div class="lock-note">Rekap ini hanya menghitung Permintaan WIP yang sudah <b>tercatat</b> (disetujui Kitchen Leader &amp; Receiving). Murni untuk melacak frekuensi — tidak berkaitan dengan stok/inventory atau Stock Opname.</div>
+    <div class="panel">
+      <div class="panel-head"><h3>Laporan Pencatatan WIP</h3><span class="panel-total">Total Tercatat: <b>${docs.length}</b></span></div>
+      <div class="filter-row">
+        ${searchDateFilterHtml({placeholder:'Cari No. Permintaan, barang, atau divisi…', search:state.reportWipSearch, dateFrom:state.reportWipDateFrom, dateTo:state.reportWipDateTo, onSearch:'setReportWipSearch', onDateFrom:'setReportWipDateFrom', onDateTo:'setReportWipDateTo', onReset:'resetReportWipFilters'})}
+      </div>
+      <div class="two-col-grid" style="padding:14px 16px;">
+        <div>
+          <div class="dash-split-label" style="padding:0 0 8px;">Barang WIP Paling Sering Diminta</div>
+          ${itemRows.length===0 ? `<div class="cell-sub">Belum ada Permintaan WIP yang tercatat pada rentang ini.</div>` :
+            itemRows.slice(0,10).map(r=>{
+              const pct = (r.count/maxItemCount)*100;
+              return `<div class="locsum-row">
+                <div class="ln-name" style="width:auto; flex:1;">${escapeHtml(r.name)}</div>
+                <div class="ln-value" style="width:auto; flex-shrink:0; margin-right:8px;">${r.count}x · ${fmtNum(r.qty)} ${escapeHtml(r.uom||'')}</div>
+                <div class="ln-track" style="flex:0 0 70px; width:70px;"><div class="ln-fill" style="width:${Math.max(4,pct)}%;"></div></div>
+              </div>`;
+            }).join('')}
+        </div>
+        <div>
+          <div class="dash-split-label" style="padding:0 0 8px;">Divisi Paling Sering Terlibat</div>
+          ${divisiRows.length===0 ? `<div class="cell-sub">Belum ada Permintaan WIP yang tercatat pada rentang ini.</div>` :
+            divisiRows.map(r=>{
+              const pct = (r.count/maxDivisiCount)*100;
+              return `<div class="locsum-row">
+                <div class="ln-name" style="width:auto; flex:1;">${escapeHtml(r.name)}</div>
+                <div class="ln-value" style="width:auto; flex-shrink:0; margin-right:8px;">${r.count}x</div>
+                <div class="ln-track" style="flex:0 0 70px; width:70px;"><div class="ln-fill" style="width:${Math.max(4,pct)}%;"></div></div>
+              </div>`;
+            }).join('')}
+        </div>
+      </div>
+      <div class="dash-split-label" style="padding:14px 16px 0;">Riwayat Permintaan WIP Tercatat</div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>No. Permintaan</th><th>Tanggal</th><th>Divisi</th><th>Barang</th><th class="num">Jumlah Baris</th></tr></thead>
+          <tbody>
+            ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="5">Tidak ada Permintaan WIP tercatat yang cocok.</td></tr>` :
+              pageDocs.map(d=>{
+                const first = d.lines[0];
+                return `<tr class="clickable" onclick="openWipDetail('${d.docNumber}')">
+                  <td class="code-mono">${d.docNumber}</td>
+                  <td>${fmtDate(d.createdAt)}</td>
+                  <td class="cell-title">${escapeHtml(first.divisionName||'—')}</td>
+                  <td>${d.lines.map(l=>escapeHtml(l.itemName)).join(', ')}</td>
+                  <td class="num">${d.lines.length}</td>
+                </tr>`;
+              }).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${paginationHtml(state.reportWipPage, totalPages, docs.length, pageSize, 'setReportWipPage', 'permintaan')}
+    </div>
+  `;
+}
+
+/* =========================================================
    SETTINGS
 ========================================================= */
 function getSettingsAccountRows(){
@@ -5414,10 +6081,28 @@ function updatePriceCalc(prefix){
 /* --- Receiving (Barang Masuk) --- */
 /* --- Penerimaan Barang (multi-item) --- */
 let receivingLines = [];
-function openReceivingModal(){
+/* editDocNumber: when set, prefills the form from an existing 'in' document
+   and routes submit to actionEditReceivingDoc instead of creating a new one.
+   Editing/deleting a receipt is restricted to canEditMaster (Master/Receiving)
+   -- same reach as who can already add a late attachment to one. */
+function openReceivingModal(editDocNumber){
   const role = currentRole();
-  if(!canReceive(role)){ toast('Peran ini tidak mencatat Penerimaan Barang.', true); return; }
-  receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'mix', locationId: WAREHOUSES[0].id}];
+  const isEdit = !!editDocNumber;
+  let first = null;
+  if(isEdit){
+    const existingLines = state.transactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber);
+    if(existingLines.length===0) return;
+    first = existingLines[0];
+    if(!canEditMaster(role)){ toast('Anda tidak dapat mengubah penerimaan ini.', true); return; }
+    receivingLines = existingLines.map(l=>({
+      _txId: l.id, itemName: l.itemName, qty: String(l.qty), uom: l.uom, price: l.price||'',
+      category: (itemById(l.itemId)||{}).category || 'Supplies', peruntukan: l.peruntukan || 'mix',
+      locationId: l.toWarehouseId,
+    }));
+  } else {
+    if(!canReceive(role)){ toast('Peran ini tidak mencatat Penerimaan Barang.', true); return; }
+    receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'mix', locationId: WAREHOUSES[0].id}];
+  }
   grAttachmentFile = null;
   const body = `
     <div id="grError"></div>
@@ -5425,22 +6110,22 @@ function openReceivingModal(){
       <div class="field">
         <label>Supplier</label>
         <div class="combo-wrap">
-          <input type="text" id="grSupplierInput" placeholder="Ketik nama supplier…" autocomplete="off"
+          <input type="text" id="grSupplierInput" placeholder="Ketik nama supplier…" autocomplete="off" value="${isEdit?escapeHtml(first.supplierName||''):''}"
             oninput="grOnSupplierInput(this.value)"
             onfocus="grRenderSupplierCombo(this.value)"
             onblur="setTimeout(()=>grCloseSupplierCombo(), 150)">
           <div class="combo-list" id="grSupplierCombo"></div>
         </div>
-        <input type="hidden" id="grSupplier" value="">
+        <input type="hidden" id="grSupplier" value="${isEdit?(first.supplierId||''):''}">
         <div class="desc" id="grSupplierHint"></div>
       </div>
-      <div class="field"><label>No. Surat Jalan / DO (opsional)</label><input type="text" id="grDoNumber" placeholder="cth. SJ-00123"></div>
+      <div class="field"><label>No. Surat Jalan / DO (opsional)</label><input type="text" id="grDoNumber" placeholder="cth. SJ-00123" value="${isEdit?escapeHtml(first.doNumber||''):''}"></div>
     </div>
     <div class="two-col">
-      <div class="field"><label>Tanggal &amp; Waktu</label><input type="datetime-local" id="grDateTime" value="${nowDatetimeLocalValue()}"></div>
+      <div class="field"><label>Tanggal &amp; Waktu</label><input type="datetime-local" id="grDateTime" value="${isEdit?toDatetimeLocalValue(first.createdAt):nowDatetimeLocalValue()}"></div>
       <div class="field"><label>PPN (opsional)</label>
         <div style="display:flex; align-items:center; gap:8px;">
-          <input type="text" inputmode="numeric" id="grPpn" placeholder="0" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
+          <input type="text" inputmode="numeric" id="grPpn" placeholder="0" value="${isEdit&&first.ppn?Number(first.ppn).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
           <span class="cell-sub" style="flex-shrink:0;">Tidak masuk Total</span>
         </div>
       </div>
@@ -5448,6 +6133,10 @@ function openReceivingModal(){
     <div class="field"><label>Barang</label><div class="cell-sub" style="margin-bottom:6px;">Tiap barang bisa punya Lokasi Tujuan sendiri-sendiri.</div><div id="grLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="grAddLine()">+ Tambah Barang</button>
     </div>
+    ${isEdit ? `
+    <div class="field"><label>Catatan (opsional)</label><textarea id="grNote" placeholder="No. PO, dll">${escapeHtml(first.note||'')}</textarea></div>
+    <div class="cell-sub" style="margin-top:-4px; margin-bottom:14px;">Lampiran PDF dikelola dari halaman detail penerimaan, bukan di sini.</div>
+    ` : `
     <div class="two-col">
       <div class="field"><label>Catatan (opsional)</label><textarea id="grNote" placeholder="No. PO, dll"></textarea></div>
       <div class="field"><label>Lampiran PDF (opsional)</label>
@@ -5455,10 +6144,13 @@ function openReceivingModal(){
         <div class="cell-sub" id="grAttachmentName" style="margin-top:5px;">Bukti penerimaan / invoice / surat jalan.</div>
       </div>
     </div>
+    `}
     <div class="stock-hint" id="grTotalHint" style="font-size:13px;"></div>
   `;
-  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitReceivingDoc()">Simpan Penerimaan</button>`;
-  openModal('Penerimaan Barang', body, foot, true);
+  const foot = isEdit
+    ? `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitReceivingDoc('${editDocNumber}')">Simpan Perubahan</button>`
+    : `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitReceivingDoc()">Simpan Penerimaan</button>`;
+  openModal(isEdit ? 'Ubah Penerimaan ' + editDocNumber : 'Penerimaan Barang', body, foot, true);
   grRenderLines();
 }
 let grAttachmentFile = null;
@@ -5631,7 +6323,7 @@ function grCloseSupplierCombo(){
   const box = document.getElementById('grSupplierCombo');
   if(box){ box.style.display='none'; box.innerHTML=''; }
 }
-async function submitReceivingDoc(){
+async function submitReceivingDoc(editDocNumber){
   const supplierEl = document.getElementById('grSupplier');
   const supplierId = supplierEl.value;
   const supplierObj = supplierId ? (state.suppliers||[]).find(s=>s.id===supplierId) : null;
@@ -5646,11 +6338,15 @@ async function submitReceivingDoc(){
   const validLines = receivingLines.filter(l=>l.itemName.trim() && parseFloat(l.qty)>0 && l.locationId);
   if(validLines.length===0){ err.innerHTML = errBox('Tambahkan minimal 1 barang dengan jumlah lebih dari 0.'); return; }
   const lines = validLines.map(l=>({
-    itemName: l.itemName.trim(), qty: parseFloat(l.qty), uom: (l.uom||'').trim()||'pcs',
+    _txId: l._txId, itemName: l.itemName.trim(), qty: parseFloat(l.qty), uom: (l.uom||'').trim()||'pcs',
     price: parsePriceInput(l.price), category: l.category || (itemByNameLookup(l.itemName)||{}).category || 'Supplies',
     peruntukan: l.peruntukan || 'mix', locationId: l.locationId,
   }));
   await submitGuarded(err, async ()=>{
+    if(editDocNumber){
+      await actionEditReceivingDoc(editDocNumber, {supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, createdAt});
+      return;
+    }
     let attachmentId = null;
     if(grAttachmentFile){
       if(!assetsCap){ throw new Error('Lampiran tidak bisa diunggah di tampilan ini. Simpan tanpa lampiran, atau coba lagi.'); }
@@ -5887,6 +6583,244 @@ async function submitReject(docNumber){
   const note = document.getElementById('rjNote').value.trim();
   const err = document.getElementById('rjError');
   await submitGuarded(err, async ()=>{ await actionDecideRequestDoc(docNumber, 'ditolak', note); });
+}
+
+/* --- Permintaan WIP (multi-item, decoupled logbook) ---
+   Deliberately its own doc-number series (WIP-000xxx, never SR-000xxx) and
+   its own transaction type ('wiprequest', never 'request' or 'transfer'),
+   so it can never be mixed into Permintaan Barang's list or its stock-moving
+   code paths. The approval action below never calls adjustStock/moveStockMulti
+   and never creates a Transfer (TR) document -- WIP Kitchen has no source
+   Gudang Utama and no real stock balance to move, so "approving" a WIP
+   request only ever changes its own status. This is purely a logbook to
+   track how many times WIP was requested/handed over between kitchen
+   divisions; it never touches inventory or Stock Opname. */
+let wipReqLines = [];
+function wipReqItems(){ return state.items.filter(i=>i.category==='WIP Kitchen'); }
+function openWipRequestModal(){
+  const role = currentRole();
+  if(!canCreateWipRequest(role)){ toast('Peran ini tidak dapat membuat Permintaan WIP.', true); return; }
+  if(wipReqItems().length===0){ toast('Belum ada barang berkategori "WIP Kitchen" di Master Data. Tambahkan dulu di halaman Barang.', true); return; }
+  const isMaster = role.kind==='master';
+  const kitchenDivisions = DIVISIONS.filter(d=>isKitchenDivision(d.id));
+  const allowedDivisions = (isMaster || role.kind==='kitchen_leader') ? kitchenDivisions : kitchenDivisions.filter(d=>role.divisionIds && role.divisionIds.includes(d.id));
+  const lockedDivision = (!isMaster && role.kind!=='kitchen_leader' && allowedDivisions.length===1) ? allowedDivisions[0] : null;
+  wipReqLines = [{itemId:'', qty:'', unit:'uom'}];
+  const body = `
+    <div id="wipReqError"></div>
+    <div class="lock-note">Permintaan WIP murni catatan serah-terima antar divisi kitchen — tidak memengaruhi stok/inventory maupun Stock Opname.</div>
+    ${lockedDivision
+      ? `<div class="lock-note">Diminta oleh <b>${escapeHtml(lockedDivision.name)}</b> — menunggu persetujuan Kitchen Leader.</div>`
+      : `<div class="field"><label>Divisi Peminta</label><select id="wipDivisi">${allowedDivisions.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
+    <div class="field"><label>Barang WIP</label><div id="wipReqLinesBox"></div>
+      <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="wipReqAddLine()">+ Tambah Barang</button>
+    </div>
+    <div class="field"><label>Catatan</label><textarea id="wipReqNote" placeholder="Untuk keperluan apa"></textarea></div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitWipRequestDoc()">Kirim Permintaan</button>`;
+  openModal('Permintaan WIP', body, foot);
+  wipReqRenderLines();
+}
+function wipReqAddLine(){ wipReqLines.push({itemId:'', qty:'', unit:'uom'}); wipReqRenderLines(); }
+function wipReqRemoveLine(idx){ wipReqLines.splice(idx,1); if(wipReqLines.length===0) wipReqLines.push({itemId:'', qty:'', unit:'uom'}); wipReqRenderLines(); }
+function wipReqUpdateLine(idx, field, value){ wipReqLines[idx][field]=value; wipReqUpdateLineHint(idx); }
+function wipReqUpdateLineHint(idx){
+  const line = wipReqLines[idx];
+  const item = line.itemId ? itemById(line.itemId) : null;
+  const hint = document.getElementById('wipReqHint'+idx);
+  if(!hint) return;
+  if(item && line.unit==='small' && srHasSmallUnit(item) && parseFloat(line.qty)>0){
+    const converted = parseFloat(line.qty) / item.conversionQty;
+    hint.innerHTML = '≈ ' + fmtNum(converted) + ' ' + escapeHtml(item.uom);
+  } else {
+    hint.innerHTML = '';
+  }
+}
+function wipReqRenderLines(){
+  const box = document.getElementById('wipReqLinesBox');
+  if(!box) return;
+  const pool = wipReqItems();
+  box.innerHTML = wipReqLines.map((line, idx)=>{
+    const selected = line.itemId ? itemById(line.itemId) : null;
+    const hasSmall = srHasSmallUnit(selected);
+    const initialHint = (hasSmall && line.unit==='small' && parseFloat(line.qty)>0) ? ('≈ ' + fmtNum(parseFloat(line.qty)/selected.conversionQty) + ' ' + escapeHtml(selected.uom)) : '';
+    return `
+    <div style="display:grid; grid-template-columns: 2fr .7fr ${hasSmall?'.9fr':'.6fr'} auto; gap:6px; margin-bottom:2px; align-items:start;">
+      <div class="combo-wrap">
+        <input type="text" id="wipReqItemInput${idx}" placeholder="Ketik untuk mencari barang WIP…" value="${selected?escapeHtml(selected.name):''}"
+          oninput="wipReqOnItemInput(${idx}, this.value)"
+          onfocus="wipReqRenderCombo(${idx}, this.value)"
+          onblur="setTimeout(()=>wipReqCloseCombo(${idx}), 150)">
+        <div class="combo-list" id="wipReqCombo${idx}"></div>
+      </div>
+      <input type="number" placeholder="Jumlah" value="${line.qty}" oninput="wipReqUpdateLine(${idx},'qty',this.value)">
+      ${hasSmall
+        ? `<select onchange="wipReqUpdateLine(${idx},'unit',this.value)" title="Pilih satuan besar atau kecil">
+            <option value="uom" ${line.unit!=='small'?'selected':''}>${escapeHtml(selected.uom)}</option>
+            <option value="small" ${line.unit==='small'?'selected':''}>${escapeHtml(selected.smallUnit)}</option>
+          </select>`
+        : `<div class="cell-sub" style="padding:9px 2px;">${selected?escapeHtml(selected.uom):''}</div>`}
+      <button type="button" class="btn btn-sm btn-quiet" onclick="wipReqRemoveLine(${idx})" title="Hapus baris">${ICONS.trash}</button>
+    </div>
+    <div class="cell-sub" id="wipReqHint${idx}" style="margin:0 0 8px; min-height:14px;">${initialHint}</div>`;
+  }).join('');
+  if(pool.length===0){ box.innerHTML = '<div class="cell-sub">Belum ada barang berkategori "WIP Kitchen" di Master Data.</div>'; }
+}
+function wipReqOnItemInput(idx, value){
+  wipReqLines[idx].itemId = '';
+  wipReqRenderCombo(idx, value);
+}
+function wipReqRenderCombo(idx, query){
+  const box = document.getElementById('wipReqCombo'+idx);
+  if(!box) return;
+  const q = (query||'').trim().toLowerCase();
+  const pool = wipReqItems();
+  const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
+  if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
+  box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="wipReqPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
+  box.style.display = 'block';
+}
+function wipReqPickCombo(idx, itemId){
+  const item = itemById(itemId);
+  if(!item) return;
+  wipReqLines[idx].itemId = itemId;
+  wipReqLines[idx].unit = 'uom';
+  wipReqCloseCombo(idx);
+  wipReqRenderLines();
+}
+function wipReqCloseCombo(idx){
+  const box = document.getElementById('wipReqCombo'+idx);
+  if(box){ box.style.display='none'; box.innerHTML=''; }
+}
+async function submitWipRequestDoc(){
+  const role = currentRole();
+  const isMaster = role.kind==='master';
+  const kitchenDivisions = DIVISIONS.filter(d=>isKitchenDivision(d.id));
+  const allowedDivisions = (isMaster || role.kind==='kitchen_leader') ? kitchenDivisions : kitchenDivisions.filter(d=>role.divisionIds && role.divisionIds.includes(d.id));
+  const lockedDivision = (!isMaster && role.kind!=='kitchen_leader' && allowedDivisions.length===1) ? allowedDivisions[0] : null;
+  const divisiEl = document.getElementById('wipDivisi');
+  const divisionId = lockedDivision ? lockedDivision.id : (divisiEl ? divisiEl.value : '');
+  const note = document.getElementById('wipReqNote').value.trim();
+  const err = document.getElementById('wipReqError');
+  if(!divisionId){ err.innerHTML = errBox('Pilih divisi peminta terlebih dahulu.'); return; }
+  const validLines = wipReqLines.filter(l=>l.itemId && parseFloat(l.qty)>0);
+  if(validLines.length===0){ err.innerHTML = errBox('Pilih minimal 1 barang WIP dengan jumlah lebih dari 0.'); return; }
+  const lines = validLines.map(l=>{
+    const item = itemById(l.itemId);
+    const enteredQty = parseFloat(l.qty);
+    const useSmall = l.unit==='small' && srHasSmallUnit(item);
+    return {
+      itemId: l.itemId,
+      qty: useSmall ? (enteredQty / item.conversionQty) : enteredQty,
+      requestedQty: useSmall ? enteredQty : null,
+      requestedUnit: useSmall ? item.smallUnit : null,
+    };
+  });
+  await submitGuarded(err, async ()=>{ await actionWipRequestDoc({divisionId, lines, note}); });
+}
+async function actionWipRequestDoc(payload){
+  const docNumber = nextDocNumber('WIP');
+  const division = divisionById(payload.divisionId);
+  for(const line of payload.lines){
+    const item = itemById(line.itemId);
+    await logTx({
+      type:'wiprequest', status:'menunggu', docNumber,
+      itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
+      requestedQty: line.requestedQty || null, requestedUnit: line.requestedUnit || null,
+      divisionId: payload.divisionId, divisionName: division ? division.name : '',
+      note: payload.note||'',
+      kitchenGateStatus: 'pending',
+    });
+  }
+  toast('Permintaan WIP ' + docNumber + ' terkirim, menunggu persetujuan Kitchen Leader.');
+  return docNumber;
+}
+async function actionApproveWipGate(docNumber){
+  const role = currentRole();
+  if(!canApproveKitchenGate(role)){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && isWipGatePending(t));
+  if(lines.length===0){ toast('Permintaan ini tidak lagi menunggu Kitchen Leader.', true); return; }
+  try{
+    for(const line of lines){
+      await db.doc('transactions/'+line.id).update({ kitchenGateStatus:'passed', kitchenGateDecidedAt: new Date().toISOString(), kitchenGateByRole: state.role });
+    }
+    toast('Permintaan WIP ' + docNumber + ' diteruskan ke Receiving.');
+  }catch(err){
+    toast(err.message || 'Gagal memproses. Coba lagi.', true);
+  }
+}
+function confirmApproveWipGate(docNumber){
+  if(!canApproveKitchenGate(currentRole())){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
+  openConfirm('Setujui Permintaan WIP', 'Setujui Permintaan WIP ' + docNumber + ' dan teruskan ke Receiving?', async ()=>{ await actionApproveWipGate(docNumber); }, 'Setujui', false);
+}
+/* Final step: Receiving/Master marks the request recorded. Unlike
+   actionApproveAndTransfer for a real SR, this never picks a source
+   warehouse, never checks stock, never calls moveStockMulti/adjustStock,
+   and never creates a Transfer (TR) document -- there is nothing to move. */
+async function actionApproveWip(docNumber){
+  if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && t.status==='menunggu');
+  if(lines.length===0){ toast('Tidak ada baris yang menunggu persetujuan.', true); return; }
+  try{
+    for(const line of lines){
+      await db.doc('transactions/'+line.id).update({ status:'disetujui', decidedAt: new Date().toISOString(), decidedByRole: state.role, decidedByRoleName: currentRole().name });
+    }
+    toast('Permintaan WIP ' + docNumber + ' tercatat selesai diserahkan.');
+  }catch(err){
+    toast(err.message || 'Gagal memproses. Coba lagi.', true);
+  }
+}
+function confirmApproveWip(docNumber){
+  if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
+  openConfirm('Catat Permintaan WIP', 'Catat Permintaan WIP ' + docNumber + ' sebagai selesai diserahkan? Ini murni catatan — tidak mengubah stok/inventory.', async ()=>{ await actionApproveWip(docNumber); }, 'Catat Selesai', false);
+}
+function openRejectWipModal(docNumber){
+  const role = currentRole();
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const first = lines[0];
+  const canGate = first && isWipGatePending(first) && canApproveKitchenGate(role);
+  const canFinal = first && !isWipGatePending(first) && canApproveSR(role);
+  if(!canGate && !canFinal){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
+  const body = `
+    <div id="wipRjError"></div>
+    <div class="field"><label>Alasan Penolakan (opsional)</label><textarea id="wipRjNote" placeholder="Kenapa permintaan ini ditolak?"></textarea></div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-danger" onclick="submitRejectWip('${docNumber}')">Tolak Permintaan</button>`;
+  openModal('Tolak Permintaan WIP ' + docNumber, body, foot);
+}
+async function submitRejectWip(docNumber){
+  const note = document.getElementById('wipRjNote').value.trim();
+  const err = document.getElementById('wipRjError');
+  await submitGuarded(err, async ()=>{ await actionDecideWipRequestDoc(docNumber, 'ditolak', note); });
+}
+async function actionDecideWipRequestDoc(docNumber, decision, note){
+  const role = currentRole();
+  if(!canApproveKitchenGate(role) && !canApproveSR(role)){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(lines.length===0 || lines[0].status!=='menunggu') return;
+  try{
+    for(const line of lines){
+      await db.doc('transactions/'+line.id).update({ status: decision, decidedAt: new Date().toISOString(), decidedByRole: state.role, decidedByRoleName: currentRole().name, rejectNote: note || null });
+    }
+    toast('Permintaan WIP ' + docNumber + ' ditolak.');
+  }catch(err){
+    toast(err.message || 'Gagal memproses permintaan. Coba lagi.', true);
+  }
+}
+function confirmDeleteWip(docNumber){
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(lines.length===0) return;
+  const role = currentRole();
+  if(!canDeleteWip(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
+  openConfirm('Hapus Permintaan WIP', `Hapus Permintaan WIP ${docNumber}? Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteWip(docNumber), 'Hapus', true);
+}
+async function actionDeleteWip(docNumber){
+  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(lines.length===0) return;
+  const role = currentRole();
+  if(!canDeleteWip(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
+  for(const line of lines){ await db.doc('transactions/'+line.id).delete(); }
+  toast('Permintaan WIP ' + docNumber + ' dihapus.');
 }
 
 /* --- Usage --- */
@@ -6196,7 +7130,7 @@ const VIEW_PERM = {
   dashboard: canViewDashboard, inventory: canViewInventory, stockopname: canManageGudang,
   receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData,
   'report-masuk': canViewOpsReports, 'report-keluar': canViewOpsReports, lowstock: canViewOpsReports, 'report-divisi': canViewReports,
-  'report-opname': canViewReports,
+  'report-opname': canViewReports, wiprequests: canSeeWipNav, 'report-wip': canSeeWipNav,
 };
 function defaultViewForRole(role){
   return canViewDashboard(role) ? 'dashboard' : 'storerequests';
@@ -6214,11 +7148,11 @@ function render(){
 
   renderShell();
   const dispatch = {
-    dashboard: renderDashboard, inventory: renderInventory, storerequests: renderStoreRequests,
+    dashboard: renderDashboard, inventory: renderInventory, storerequests: renderStoreRequests, wiprequests: renderWipRequests,
     receiving: renderReceiving, stockopname: renderStokOpname, 'opname-count': renderOpnameCounting,
     items: renderItemsMaster, suppliers: renderSuppliers, locations: renderLocations,
     'report-masuk': renderReportMasuk, 'report-keluar': renderReportKeluar, lowstock: renderLowStock, 'report-divisi': renderReportDivisi,
-    'report-opname': renderReportOpname,
+    'report-opname': renderReportOpname, 'report-wip': renderReportWip,
     setting: renderSetting, 'activity-log': renderActivityLog,
   };
   (dispatch[state.view] || dispatch[defaultViewForRole(role)])();

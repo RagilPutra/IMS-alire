@@ -7,9 +7,22 @@ app you already had — only a small compatibility shim was added at the top
 of its script, so it keeps talking to `claude.use('db')` etc., just now
 backed by this server's REST API instead.
 
-It comes pre-loaded with a full export of your real data: 822 items, 822
-stock records, all suppliers, transactions, stock-opname sessions/details.
-Run the migration step below once and it's all there.
+It comes pre-loaded with the deduplicated master data and the finalized
+**Stock Opname Agustus 2026** results: 727 items (duplicates merged, WIP
+items split from regular ones, unit-collisions resolved), 931 live stock
+records computed from that opname (total value Rp 236.798.418,53 — matches
+the source Excel almost exactly), plus all 56 suppliers. `transactions` and
+`opnameDrafts` are intentionally empty — there's no source data for them in
+this rebuild. Run the migration step below and it's all there.
+
+**If you already deployed this app before** (with the old, non-deduplicated
+data): running the migration again is safe and expected. `migrate/seed.js`
+now *replaces* `items`, `stock`, `transactions`, `opnameSessions`,
+`opnameDetails` and `opnameDrafts` from scratch on every run (old rows in
+those collections are cleared first) — it does **not** just add to what's
+there, otherwise old duplicate items would sit alongside the new
+deduplicated ones. Your `suppliers` and any custom user accounts are never
+touched.
 
 ## What's included
 
@@ -56,9 +69,12 @@ shows one, skip straight to adding your remote and pushing.)
    railway run npm run migrate
    ```
 
-   This loads all 822 items, 822 stock records, suppliers, transactions,
-   and stock-opname history into the new database. It's safe to re-run —
-   it just re-syncs the same records, it won't duplicate anything.
+   This loads all 727 items, 931 stock records, 56 suppliers, and the
+   Stock Opname Agustus 2026 history into the database. It's safe to
+   re-run — `items`, `stock`, `transactions`, `opnameSessions`,
+   `opnameDetails` and `opnameDrafts` are cleared and reloaded fresh each
+   time (so it never duplicates), while `suppliers` and `users` are only
+   ever added to or updated, never cleared.
 
 7. Open the URL Railway gives your service. The app should load and behave
    exactly like it did before, now backed by a real database.
