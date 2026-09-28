@@ -7,13 +7,15 @@ app you already had — only a small compatibility shim was added at the top
 of its script, so it keeps talking to `claude.use('db')` etc., just now
 backed by this server's REST API instead.
 
-It comes pre-loaded with the deduplicated master data and the finalized
-**Stock Opname Agustus 2026** results: 727 items (duplicates merged, WIP
-items split from regular ones, unit-collisions resolved), 931 live stock
-records computed from that opname (total value Rp 236.798.418,53 — matches
-the source Excel almost exactly), plus all 56 suppliers. `transactions` and
-`opnameDrafts` are intentionally empty — there's no source data for them in
-this rebuild. Run the migration step below and it's all there.
+It comes pre-loaded with a full export of the live app's data as of
+**28 September 2026** (right before go-live): 727 items, 931 live stock
+records, all 56 suppliers, and the finalized **Stock Opname Agustus 2026**
+history (`opnameSessions` + all 6 `opnameDetails`). `transactions`,
+`opnameDrafts`, `users`, and `monthlyNetSales` are empty because they were
+also empty in the live app at export time (no transactions had been logged
+yet, and no custom user accounts had been created) — this is a faithful
+mirror, not a stripped-down rebuild. Run the migration step below and it's
+all there.
 
 **If you already deployed this app before** (with the old, non-deduplicated
 data): running the migration again is safe and expected. `migrate/seed.js`
@@ -76,6 +78,13 @@ shows one, skip straight to adding your remote and pushing.)
    time (so it never duplicates), while `suppliers` and `users` are only
    ever added to or updated, never cleared.
 
+   **If you already deployed and used the app for real** (added your own
+   transactions, opname counts, or accounts since an earlier zip), running
+   this migration again will wipe `items`, `stock`, `transactions`,
+   `opnameSessions`, `opnameDetails` and `opnameDrafts` back to this zip's
+   snapshot and lose anything newer. Only re-run the migration on a fresh
+   database, or if you specifically want to reset to this snapshot.
+
 7. Open the URL Railway gives your service. The app should load and behave
    exactly like it did before, now backed by a real database.
 
@@ -87,12 +96,15 @@ from outside Railway's network) and just run `npm run migrate` locally.
 
 ## Login
 
-Login is unchanged from before — the same demo accounts and passwords
+Login logic is unchanged from before — the same demo accounts and passwords
 (`admin123`) the app already used, plus any custom accounts you create from
-Settings (stored in the `users` collection, same as before). This was a
-deliberate choice to keep things simple rather than build real per-user
-authentication; the `APP_KEY` above is what protects the API itself from
-random internet traffic, not from users of the app.
+Settings (stored in the `users` collection, same as before). The login
+screen no longer *displays* the list of demo accounts/passwords (removed
+now that the app is going live, not just for testing), but the accounts
+themselves still work exactly as before. This was a deliberate choice to
+keep things simple rather than build real per-user authentication; the
+`APP_KEY` above is what protects the API itself from random internet
+traffic, not from users of the app.
 
 ## Attachments (PDF uploads on goods receipts)
 

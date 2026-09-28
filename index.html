@@ -147,11 +147,13 @@
   .btn-danger-outline{background:var(--danger-tint); color:var(--danger); border-color:transparent;}
   .btn-approve{background:var(--success); color:#fff;}
   .btn:disabled{opacity:.4; cursor:not-allowed;}
+  .action-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; align-items:center;}
+
+  /* ---------- Icon-only row actions (edit/delete without text labels) ---------- */
   .icon-btn{width:27px; height:27px; display:inline-flex; align-items:center; justify-content:center; border:1px solid var(--border-strong); background:var(--surface); border-radius:6px; color:var(--text-secondary); cursor:pointer; flex-shrink:0; padding:0;}
   .icon-btn svg{width:14px; height:14px;}
   .icon-btn:hover{background:var(--surface-2); color:var(--text); border-color:var(--border-strong);}
   .icon-btn.icon-btn-danger:hover{background:var(--danger-tint); color:var(--danger); border-color:var(--danger-tint);}
-  .action-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:18px; align-items:center;}
 
   /* ---------- KPI strip (NOT cards) ---------- */
   .kpi-strip{display:flex; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); margin-bottom:22px; overflow-x:auto;}
@@ -410,6 +412,11 @@
   .dash-wh-parts .loc-row .lr-name{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
   .dash-wh-parts .loc-row .lr-val{width:118px; flex-shrink:0; text-align:right;}
   .dash-wh-parts .loc-row .lr-pct{width:36px; flex-shrink:0; text-align:right; margin-left:10px;}
+  /* Grand-total row under "Rincian Gudang Utama per Peruntukan" -- same
+     3-column layout as the peruntukan rows above it (name / value / pct,
+     value sitting right next to pct) instead of the locsum-row layout
+     (built for the other column's progress bars), so the value+pct columns
+     line up straight down the whole panel and the longer label never wraps. */
   .dash-total-row{justify-content:flex-start; padding:10px 12px; margin:8px 16px 14px; border-radius:6px;}
   .dash-total-row .lr-name{flex:1; min-width:0; white-space:nowrap;}
   .dash-total-row .lr-val{width:118px; flex-shrink:0; text-align:right;}
@@ -480,12 +487,6 @@
   .login-card h1{margin:0 0 5px; font-family:var(--font-ui); font-size:19px; font-weight:800;}
   .login-card p.sub{margin:0 0 20px; font-size:12.5px; color:var(--text-secondary);}
   .login-card .btn-primary{width:100%; justify-content:center; padding:10px; font-size:13px;}
-  .login-demo{margin-top:20px; text-align:center;}
-  .login-demo-toggle{background:none; border:none; color:var(--text-faint); font-size:11.5px; font-weight:700; cursor:pointer; text-decoration:underline;}
-  .login-demo-list{margin-top:11px; text-align:left; background:var(--surface-2); border-radius:8px; padding:11px 13px; font-size:11px; color:var(--text-secondary); max-width:360px;}
-  .login-demo-list .ldl-pass{font-weight:800; color:var(--text); margin-bottom:7px;}
-  .login-demo-grid{display:grid; grid-template-columns:1fr 1fr; gap:4px 12px;}
-  .login-demo-grid b{color:var(--text); font-weight:700;}
 
   /* ---------- Mobile ---------- */
   .mobile-topnav{display:none;}
@@ -498,9 +499,13 @@
        the pill bar scrolling away while only the topbar stays put. */
     .mobile-sticky-head{display:block; position:sticky; top:0; z-index:6;}
     .topbar{position:static;}
-    .mobile-topnav{display:flex; gap:6px; overflow-x:auto; background:var(--brand-dark); padding:9px 12px; padding-top:calc(9px + env(safe-area-inset-top,0px));}
+    .mobile-topnav{display:flex; align-items:center; gap:6px; overflow-x:auto; background:var(--brand-dark); padding:9px 12px; padding-top:calc(9px + env(safe-area-inset-top,0px));}
     .mobile-topnav button{flex-shrink:0; border:none; background:rgba(255,255,255,.1); color:#F1E7DC; padding:7px 12px; border-radius:20px; font-size:12px; font-weight:700; cursor:pointer;}
     .mobile-topnav button.active{background:#fff; color:var(--brand-dark);}
+    /* Divider between OPERASIONAL / MASTER DATA / LAPORAN groups in the
+       mobile pill nav, mirroring the section labels the desktop sidebar
+       shows -- previously all items ran together with no grouping at all. */
+    .mobile-nav-sep{width:1px; align-self:stretch; background:rgba(255,255,255,.28); flex-shrink:0; margin:1px 2px;}
     /* Keep title and date/bell on one row on mobile too (like desktop) so
        the bar stays short -- previously they stacked, doubling its height. */
     .topbar-inner{padding:14px 16px; flex-direction:row; align-items:flex-end; gap:10px;}
@@ -514,7 +519,16 @@
     .drawer{width:100%; max-width:100%;}
     table{font-size:11.5px;}
     th, td{padding:8px 10px;}
-    .kpi-cell{min-width:46%;}
+    /* Two KPI cards per row on mobile. min-width:46% alone (the old rule)
+       let a long Rupiah value like "Rp236.798.418" overflow past its own
+       card's edge and sit on top of the neighbouring card's text, since
+       flex:1 + no wrap + no width cap never actually constrained the
+       value's box. Wrap the strip, give each cell a hard 50% box, and let
+       the value itself break instead of overflowing. */
+    .kpi-strip{flex-wrap:wrap; overflow-x:visible;}
+    .kpi-cell{flex:0 0 50%; width:50%; min-width:0; box-sizing:border-box; padding:13px 14px; overflow:hidden;}
+    .kpi-cell:nth-child(2n){border-right:none;}
+    .kpi-value{font-size:16.5px; overflow-wrap:anywhere; word-break:break-word;}
   }
 </style>
 </head>
@@ -770,6 +784,7 @@
 })();
 </script>
 
+
 <script>
 /* =========================================================
    CONSTANTS
@@ -892,6 +907,7 @@ const NAV = [
   {id:'items', label:'Barang', icon:'list', section:'MASTER DATA', perm: canViewMasterData},
   {id:'suppliers', label:'Supplier', icon:'truck', section:'MASTER DATA', perm: canViewSuppliers},
   {id:'locations', label:'Lokasi', icon:'pin', section:'MASTER DATA', perm: canViewMasterData},
+  {id:'wipitems', label:'Barang WIP', icon:'utensils', section:'MASTER DATA', perm: canViewMasterData},
   {id:'report-masuk', label:'Barang Masuk', icon:'inflow', section:'LAPORAN', perm: canViewOpsReports},
   {id:'report-keluar', label:'Barang Bergerak', icon:'move', section:'LAPORAN', perm: canViewOpsReports},
   {id:'report-wip', label:'Laporan Pencatatan WIP', icon:'utensils', section:'LAPORAN', perm: canSeeWipNav},
@@ -911,6 +927,7 @@ const ICONS = {
   bell:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5.5a4.5 4.5 0 0 0-4.5 4.5c0 4.5-2 6-2 6h13s-2-1.5-2-6a4.5 4.5 0 0 0-4.5-4.5z"/><path d="M10.4 19.5a1.6 1.6 0 0 0 3.2 0"/></svg>',
   arrowleft:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12H4M11 5l-7 7 7 7"/></svg>',
   check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M20 6L9 17l-5-5"/></svg>',
+  lock:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   upload:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 16V4M7 9l5-5 5 5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>',
   download:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>',
   swap:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3l4 4-4 4"/><path d="M3 7h8"/><path d="M17 21l-4-4 4-4"/><path d="M21 17h-8"/></svg>',
@@ -953,13 +970,14 @@ const state = {
   invSearch: '', invCategory: '', invStatus: '', invLocation: '', invPeruntukan: '', invSort: 'name_asc', invPage: 1, invPageSize: 50,
   srTab: 'menunggu', srPage: 1, srPageSize: 50, srSearch: '', srDateFrom: '', srDateTo: '',
   wipTab: 'menunggu', wipPage: 1, wipPageSize: 50, wipSearch: '', wipDateFrom: '', wipDateTo: '',
-  reportMasukLocation: '', reportMasukSupplier: '', reportMasukPage: 1, reportMasukPageSize: 50, reportMasukSearch: '', reportMasukDateFrom: '', reportMasukDateTo: '',
+  reportMasukLocation: '', reportMasukSupplier: '', reportMasukCategory: '', reportMasukPage: 1, reportMasukPageSize: 50, reportMasukSearch: '', reportMasukDateFrom: '', reportMasukDateTo: '',
   reportKeluarLocation: '', reportKeluarPage: 1, reportKeluarPageSize: 50, reportKeluarSearch: '', reportKeluarDateFrom: '', reportKeluarDateTo: '',
   reportWipPage: 1, reportWipPageSize: 50, reportWipSearch: '', reportWipDateFrom: '', reportWipDateTo: '',
   receivingSearch: '', receivingDateFrom: '', receivingDateTo: '', receivingPage: 1, receivingPageSize: 50,
   transfersSearch: '', transfersDateFrom: '', transfersDateTo: '', transfersPage: 1, transfersPageSize: 50,
   lowStockSearch: '', lowStockStatus: '', lowStockLocation: '', lowStockPage: 1, lowStockPageSize: 50,
   itemsSearch: '', itemsCategory: '', itemsStatus: '', itemsPriceMin: '', itemsPriceMax: '', itemsPage: 1, itemsPageSize: 50,
+  wipItemsSearch: '', wipItemsCategory: '', wipItemsPage: 1, wipItemsPageSize: 50,
   supplierSearch: '', supplierStatus: '', supplierPage: 1,
   drawerItemId: null,
   suppliers: [],
@@ -968,6 +986,7 @@ const state = {
   opnameSessions: [],
   opnameDrafts: [], // in-progress (unsubmitted) counting sessions, one per locationId+periodKey -- see saveOpnameDraftNow()
   opnameCountLocation: null, opnameSearch: '', opnamePage: 1, opnamePeriod: currentPeriodKey(), opnamePeruntukan: '', opnameSort: 'name_asc',
+  opnameCorrectLocation: null, opnameCorrectPeriod: null, opnameCorrectSearch: '',
   activityLogSearch: '', activityLogType: '', activityLogPage: 1,
   monthlyNetSales: [],
   reportOpname: { tab:'r1', asOf:'', period: currentPeriodKey(), histCache:{}, purchaseCache:{}, loadingHist:false, loadingPurchase:false, r1Search:'', r1Category:'', r1Location:'', r1Sort:{field:'default', dir:'asc'} },
@@ -1369,10 +1388,29 @@ async function moveStockMulti(sourceBuckets, toWarehouseId, itemId){
   }
 }
 
-function nextItemCode(){
-  const existing = new Set(state.items.map(i=>(i.kode||'').toUpperCase()));
-  let n = state.items.length + 1, code;
-  do{ code = 'INV-' + String(n).padStart(4,'0'); n++; } while(existing.has(code));
+/* Suggests the next available item code. Real codes here are plain
+   incrementing numbers ("1", "2", … "930", no prefix/padding) for regular
+   items, and 3-digit K-/B- codes for WIP Kitchen / WIP Bar items
+   respectively (e.g. "K-143", "B-029") -- never "INV-0001", which was never
+   how this catalog was actually coded. Suggests max-existing-of-that-kind
+   + 1, then walks forward past anything already taken so it never
+   collides, instead of guessing from the item count (which drifts once
+   any item is deleted or codes have gaps). */
+function nextItemCode(category){
+  const items = state.items;
+  if(category === 'WIP Kitchen' || category === 'WIP Bar'){
+    const prefix = category === 'WIP Kitchen' ? 'K' : 'B';
+    const re = new RegExp('^' + prefix + '-(\\d+)$', 'i');
+    const nums = items.map(i=>{ const m = re.exec((i.kode||'').trim()); return m ? parseInt(m[1],10) : null; }).filter(n=>n!==null);
+    const existing = new Set(items.map(i=>(i.kode||'').trim().toUpperCase()));
+    let n = nums.length ? Math.max(...nums)+1 : 1, code;
+    do{ code = prefix + '-' + String(n).padStart(3,'0'); n++; } while(existing.has(code));
+    return code;
+  }
+  const nums = items.map(i=>{ const k=(i.kode||'').trim(); return /^\d+$/.test(k) ? parseInt(k,10) : null; }).filter(n=>n!==null);
+  const existing = new Set(items.map(i=>(i.kode||'').trim()));
+  let n = nums.length ? Math.max(...nums)+1 : 1, code;
+  do{ code = String(n); n++; } while(existing.has(code));
   return code;
 }
 
@@ -2158,8 +2196,15 @@ function renderShell(){
   if(newNavScroll) newNavScroll.scrollTop = navScrollTop;
 
   const mobileNav = document.getElementById('mobileNav');
-  mobileNav.innerHTML = visibleNav.map(n=>`<button class="${state.view===n.id?'active':''}" onclick="goto('${n.id}')">${n.label}${n.badgeKey==='pending'&&pendingCount()>0?' ('+pendingCount()+')':''}${n.badgeKey==='pendingwip'&&pendingWipCount()>0?' ('+pendingWipCount()+')':''}</button>`).join('')
-    + `<button class="${state.view==='setting'?'active':''}" onclick="goto('setting')">Akun</button>`;
+  // Same section grouping as the desktop sidebar (navSections, above) --
+  // insert a thin vertical divider between Operasional / Master Data /
+  // Laporan so the pill bar doesn't read as one undifferentiated run of
+  // buttons on mobile.
+  mobileNav.innerHTML = navSections.map((sec, idx)=>{
+    const btns = sec.items.map(n=>`<button class="${state.view===n.id?'active':''}" onclick="goto('${n.id}')">${n.label}${n.badgeKey==='pending'&&pendingCount()>0?' ('+pendingCount()+')':''}${n.badgeKey==='pendingwip'&&pendingWipCount()>0?' ('+pendingWipCount()+')':''}</button>`).join('');
+    return (idx>0 ? '<span class="mobile-nav-sep"></span>' : '') + btns;
+  }).join('')
+    + `<span class="mobile-nav-sep"></span><button class="${state.view==='setting'?'active':''}" onclick="goto('setting')">Akun</button>`;
 
   document.getElementById('topbarRight').innerHTML = `
     <div class="topbar-clock" id="topbarClock"></div>
@@ -2179,12 +2224,14 @@ function renderShell(){
     stockopname:['Stok Opname','Revisi stok fisik & bandingkan dengan penjualan'],
     'activity-log':['Aktivitas Terbaru','Seluruh riwayat pergerakan barang'],
     'opname-count':['Hitung Fisik','Masukkan jumlah fisik hasil hitung'],
+    'opname-correct':['Koreksi Opname Terkunci','Khusus Master — mengoreksi data opname yang sudah final'],
     storerequests:['Permintaan Barang','Permintaan dari divisi ke Gudang Utama'],
     wiprequests:['Permintaan WIP','Serah-terima WIP antar divisi kitchen — tidak memengaruhi stok/inventory maupun Stock Opname'],
     receiving:['Penerimaan Barang','Barang masuk dari supplier'],
     items:['Barang','Master data katalog barang'],
     suppliers:['Supplier','Master data pemasok'],
     locations:['Lokasi','Gudang Utama dan Gudang Divisi'],
+    wipitems:['Barang WIP','Master data katalog barang WIP Kitchen & Bar — tidak terhubung ke stok/inventory maupun Stock Opname'],
     'report-masuk':['Laporan Barang Masuk','Riwayat penerimaan barang'],
     'report-keluar':['Laporan Barang Bergerak','Semua perpindahan stok antar lokasi, manual maupun dari Permintaan Barang'],
     lowstock:['Stok Rendah dan Habis','Barang yang perlu segera diisi ulang di Gudang Utama'],
@@ -2196,8 +2243,15 @@ function renderShell(){
   const t = titles[state.view] || ['', ''];
   document.getElementById('pageTitle').textContent = t[0];
   document.getElementById('pageSub').textContent = t[1];
-  document.getElementById('topbarBack').innerHTML = state.view !== 'dashboard'
-    ? `<button onclick="goto('dashboard')">${ICONS.arrowleft} Dashboard</button>` : '';
+  // Hitung Fisik (opname-count) already has its own "Kembali ke Stock
+  // Opname" button in the page body (backToOpnameList(), which also flushes
+  // the pending draft save) -- the small topbar back-link used to always
+  // say "Dashboard" regardless of view, which on this page meant two back
+  // links pointing to two different places. Route it to the same place.
+  document.getElementById('topbarBack').innerHTML = (state.view === 'opname-count' || state.view === 'opname-correct')
+    ? `<button onclick="backToOpnameList()">${ICONS.arrowleft} Stock Opname</button>`
+    : state.view !== 'dashboard'
+      ? `<button onclick="goto('dashboard')">${ICONS.arrowleft} Dashboard</button>` : '';
 }
 
 function notifPanelHtml(){
@@ -2437,25 +2491,27 @@ function renderDashboard(){
      month will land if the current daily pace holds, so the number is
      meaningful before the month has actually finished. */
   const dayOfMonth = now.getDate();
-  const daysInThisMonth = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
-  const startOfLastMonthSameDay = new Date(now.getFullYear(), now.getMonth()-1, dayOfMonth+1); // exclusive end
+  const startOfLastMonthSameDay = new Date(now.getFullYear(), now.getMonth()-1, dayOfMonth+1); // exclusive end, for a fair same-day-of-month comparison
   const receivingValueThisMonth = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
   const receivingValueLastMonth = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
   const receivingValueLastMonthToSameDay = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfLastMonthSameDay).reduce((s,t)=>s+(t.totalValue||0),0);
-  const runRateProjected = dayOfMonth>0 ? (receivingValueThisMonth / dayOfMonth * daysInThisMonth) : 0;
+  /* Simple, single comparison: this month's Rupiah received so far vs
+     last month's Rupiah received in that same 1..dayOfMonth window (an
+     apples-to-apples period, not the confusing "run rate" projection this
+     used to show, which extrapolated the rest of the month with no clear
+     baseline). Falls back to the full last-month total if there's nothing
+     yet in that same-day window to compare against. */
   let receivingCompareHtml = '';
-  if(receivingLastMonthDocs > 0){
-    const pct = Math.round(((receivingThisMonthDocs - receivingLastMonthDocs) / receivingLastMonthDocs) * 100);
-    const up = pct >= 0;
-    receivingCompareHtml = `<div class="kpi-compare ${up?'up':'down'}">${up?'↑':'↓'} ${up?'+':''}${pct}% <span>dibanding bulan lalu</span></div>`;
-  } else if(receivingThisMonthDocs > 0){
-    receivingCompareHtml = `<div class="kpi-compare up">↑ Baru <span>dibanding bulan lalu</span></div>`;
-  }
-  let receivingRunRateHtml = '';
   if(receivingValueLastMonthToSameDay > 0){
-    const ratePct = Math.round(((receivingValueThisMonth - receivingValueLastMonthToSameDay) / receivingValueLastMonthToSameDay) * 100);
-    const rateUp = ratePct >= 0;
-    receivingRunRateHtml = `<div class="kpi-compare ${rateUp?'up':'down'}">${rateUp?'↑':'↓'} ${rateUp?'+':''}${ratePct}% <span>run rate vs bulan lalu (hari 1–${dayOfMonth})</span></div>`;
+    const pct = Math.round(((receivingValueThisMonth - receivingValueLastMonthToSameDay) / receivingValueLastMonthToSameDay) * 100);
+    const up = pct >= 0;
+    receivingCompareHtml = `<div class="kpi-compare ${up?'up':'down'}">${up?'↑':'↓'} ${up?'+':''}${pct}% <span>dibanding bulan lalu (s.d. tanggal yang sama)</span></div>`;
+  } else if(receivingValueLastMonth > 0){
+    const pct = Math.round(((receivingValueThisMonth - receivingValueLastMonth) / receivingValueLastMonth) * 100);
+    const up = pct >= 0;
+    receivingCompareHtml = `<div class="kpi-compare ${up?'up':'down'}">${up?'↑':'↓'} ${up?'+':''}${pct}% <span>dibanding total bulan lalu</span></div>`;
+  } else if(receivingValueThisMonth > 0){
+    receivingCompareHtml = `<div class="kpi-compare up">↑ Baru <span>dibanding bulan lalu</span></div>`;
   }
 
   let actions = '';
@@ -2511,8 +2567,7 @@ function renderDashboard(){
         <div class="kpi-head"><div class="kpi-icon">${ICONS.inflow}</div><div class="kpi-label">Barang Masuk</div></div>
         <div class="kpi-value">${fmtIDR(receivingValueThisMonth)}</div>
         <div class="kpi-note">${receivingThisMonthDocs} transaksi bulan ini · bulan lalu ${fmtIDR(receivingValueLastMonth)} (${receivingLastMonthDocs} transaksi)</div>
-        <div class="kpi-note">Proyeksi akhir bulan (run rate): <b style="color:var(--text);">${fmtIDR(runRateProjected)}</b></div>
-        ${receivingRunRateHtml || receivingCompareHtml}
+        ${receivingCompareHtml}
       </div>
     </div>
     <div class="action-row">${actions}</div>
@@ -2940,6 +2995,7 @@ function resetInvFilters(){ state.invSearch=''; state.invCategory=''; state.invL
 function renderStokOpname(){
   const role = currentRole();
   const canOpname = canManageGudang(role);
+  const isMaster = role.kind==='master';
   const periodKey = state.opnamePeriod || currentPeriodKey();
   const session = state.opnameSessions.find(s=>s.periodKey===periodKey);
   const locationsDone = (session && session.locationsDone) || {};
@@ -2984,10 +3040,44 @@ function renderStokOpname(){
               const usedVal = locationUsedValues[w.id];
               const usedColor = usedVal>0 ? 'var(--text)' : (usedVal<0 ? 'var(--success)' : 'var(--text-faint)');
               const draft = !done ? findOpnameDraft(w.id, periodKey) : null;
+              // Draft -> Checked ("Hampir Final") -> Selesai (locked). Checked
+              // just means the counter has reviewed it as ready -- stock is
+              // NOT adjusted until the lock icon is clicked and confirmed;
+              // any further edit (any real draft save) clears `checked` again
+              // so a stale review can't be locked by mistake. Distinct tag
+              // colors so "Draft" and "Belum" don't read as the same thing.
+              const checked = !!(draft && draft.checked);
               const statusTag = done ? '<span class="tag tag-approved">Selesai</span>'
-                : draft ? `<span class="tag tag-pending">Draft</span><div class="cell-sub">tersimpan ${fmtTime(draft.updatedAt)}</div>`
+                : checked ? `<span class="tag tag-gold">Hampir Final</span><div class="cell-sub">ditandai ${fmtTime(draft.checkedAt||draft.updatedAt)}</div>`
+                : draft ? `<span class="tag tag-neutral">Draft</span><div class="cell-sub">tersimpan ${fmtTime(draft.updatedAt)}</div>`
                 : '<span class="tag tag-pending">Belum</span>';
-              const btnLabel = done ? 'Ulangi Opname' : (draft ? 'Lanjutkan Opname' : 'Mulai Opname');
+              let actionsHtml;
+              if(!canOpname){
+                actionsHtml = '';
+              } else if(done){
+                // Locked -- this is now treated as a finalized financial
+                // record and can no longer be redone from here. The one
+                // exception: Master User can open a dedicated correction
+                // screen that edits the recorded numbers directly (as a
+                // delta against what's already locked), never by resubmitting
+                // against today's live stock -- see openOpnameCorrection().
+                actionsHtml = `<div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                  <span class="cell-sub" style="display:inline-flex; align-items:center; gap:5px;">${ICONS.lock} Terkunci</span>
+                  ${isMaster ? `<button class="btn btn-sm btn-outline" onclick="openOpnameCorrection('${w.id}','${periodKey}')">Edit (Master)</button>` : ''}
+                </div>`;
+              } else if(checked){
+                actionsHtml = `<div style="display:flex; gap:6px;">
+                  <button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">Edit Opname</button>
+                  <button class="icon-btn" title="Kunci hasil opname ${escapeHtml(w.name)} -- final, stok disesuaikan, tidak bisa diubah lagi" onclick="confirmLockOpname('${w.id}','${periodKey}')">${ICONS.lock}</button>
+                </div>`;
+              } else if(draft){
+                actionsHtml = `<div style="display:flex; gap:6px;">
+                  <button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">Lanjutkan Opname</button>
+                  <button class="icon-btn" title="Tandai hampir final -- stok belum disesuaikan, masih bisa diedit" onclick="markOpnameDraftChecked('${w.id}','${periodKey}')">${ICONS.check}</button>
+                </div>`;
+              } else {
+                actionsHtml = `<button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">Mulai Opname</button>`;
+              }
               return `<tr>
                 <td class="cell-title">${w.name}</td>
                 <td class="num">${done ? fmtIDR(locationValues[w.id]) : '—'}</td>
@@ -2995,7 +3085,7 @@ function renderStokOpname(){
                 <td class="num">${done ? fmtIDR(locationAddedWipValues[w.id]||0) : '—'}</td>
                 <td class="num" style="color:${usedColor};">${done ? fmtIDR(usedVal||0) : '—'}</td>
                 <td>${statusTag}</td>
-                <td>${canOpname ? `<button class="btn btn-sm btn-outline" onclick="openOpnameCounting('${w.id}')">${btnLabel}</button>` : ''}</td>
+                <td>${actionsHtml}</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -3114,6 +3204,7 @@ async function saveOpnameDraftNow(silent){
     await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).set({
       locationId, periodKey,
       counts: {...opnameCounts}, touched: {...opnameTouched}, added: {...opnameAdded},
+      checked: false, checkedAt: null,
       updatedAt: nowIso,
     });
     const el = document.getElementById('opnameDraftStatus');
@@ -3132,6 +3223,33 @@ function saveOpnameDraftManual(){
 async function deleteOpnameDraft(locationId, periodKey){
   try{ await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).delete(); }catch(err){ /* best-effort cleanup */ }
 }
+/* "Hampir Final" -- marks a draft as checked/ready without touching real
+   stock yet. Purely a status flag on the draft doc; the opnameDrafts
+   onSnapshot listener re-renders the Stock Opname list automatically. */
+async function markOpnameDraftChecked(locationId, periodKey){
+  try{
+    await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).update({
+      checked: true, checkedAt: new Date().toISOString(),
+    });
+    toast('Opname ' + whName(locationId) + ' ditandai hampir final.');
+  }catch(err){
+    toast(err.message || 'Gagal menandai hampir final. Coba lagi.', true);
+  }
+}
+function confirmLockOpname(locationId, periodKey){
+  openConfirm(
+    'Kunci Hasil Opname',
+    'Mengunci hasil opname ' + whName(locationId) + ' akan menyesuaikan stok sistem sesuai hasil hitung fisik ini dan menjadikannya data final untuk lokasi & periode ini. Setelah dikunci, hasil ini tidak bisa diubah atau diulang lagi. Lanjutkan?',
+    ()=>lockOpnameLocation(locationId, periodKey),
+    'Kunci', true
+  );
+}
+async function lockOpnameLocation(locationId, periodKey){
+  const draft = findOpnameDraft(locationId, periodKey);
+  if(!draft){ toast('Draft opname tidak ditemukan.', true); return; }
+  const ok = await actionSubmitOpnameCount(locationId, {...draft.counts}, periodKey, {...(draft.added||{})});
+  if(ok) await deleteOpnameDraft(locationId, periodKey);
+}
 // Flushes any not-yet-saved edit (the debounce is still pending) before
 // leaving the counting page, so navigating away right after typing doesn't
 // lose the last couple of seconds' worth of counts.
@@ -3141,6 +3259,12 @@ function backToOpnameList(){
 }
 function openOpnameCounting(locationId){
   if(!canManageGudang(currentRole())){ toast('Peran ini tidak dapat melakukan Stock Opname.', true); return; }
+  const periodKeyGuard = state.opnamePeriod || currentPeriodKey();
+  const sessionGuard = state.opnameSessions.find(s=>s.periodKey===periodKeyGuard);
+  if(sessionGuard && sessionGuard.locationsDone && sessionGuard.locationsDone[locationId]){
+    toast('Opname ' + whName(locationId) + ' sudah terkunci sebagai data final, tidak bisa diulang.', true);
+    return;
+  }
   state.opnameCountLocation = locationId;
   opnameCounts = {};
   opnameAdded = {};
@@ -3309,12 +3433,223 @@ function renderOpnameCounting(){
       </div>
       ${paginationHtml(state.opnamePage, totalPages, items.length, pageSize, 'setOpnamePage', 'barang')}
     </div>
-    <div class="action-row" style="justify-content:flex-end; gap:8px;">
+    <div class="action-row" style="justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
+      <span class="cell-sub" style="max-width:420px;">Menandai hampir final dan mengunci hasil opname dilakukan dari menu Stock Opname, bukan di sini.</span>
       <button class="btn btn-outline" onclick="saveOpnameDraftManual()">Simpan Draft</button>
-      <button class="btn btn-primary" id="opnameSubmitBtn" onclick="submitOpnameCounting()">Simpan Hasil Opname ${w.name}</button>
     </div>
   `;
   opnameUpdateTotals();
+}
+/* =========================================================
+   STOCK OPNAME — koreksi Master untuk lokasi yang sudah terkunci
+   Sengaja TIDAK memakai alur hitung-fisik biasa (renderOpnameCounting /
+   actionSubmitOpnameCount), yang membandingkan hitungan terhadap stok LIVE
+   saat ini -- kalau dipakai ulang di sini, transaksi lain yang terjadi
+   setelah dikunci (barang masuk, pemakaian, dst) ikut ketimpa atau
+   terhitung dua kali. Di sini stok hanya disesuaikan sebesar SELISIH
+   antara angka lama yang sudah dikunci dan angka baru yang dimasukkan
+   Master, lalu opnameDetails & opnameSessions (dan groupValues bila
+   periode sudah difinalisasi) diperbarui supaya laporan tetap konsisten.
+   Hanya mengoreksi barang yang sudah tercatat di opname tsb -- bukan
+   tempat menambah barang baru, dan barang tambahan manual (WIP/Tambahan,
+   yang memang tidak pernah menyentuh stok) tidak ikut dikoreksi di sini. */
+let opnameCorrectDetail = null;
+let opnameCorrectQty = {};
+let opnameCorrectLoading = false;
+function openOpnameCorrection(locationId, periodKey){
+  const role = currentRole();
+  if(role.kind!=='master'){ toast('Hanya Master User yang dapat mengoreksi opname yang sudah terkunci.', true); return; }
+  state.opnameCorrectLocation = locationId;
+  state.opnameCorrectPeriod = periodKey;
+  state.opnameCorrectSearch = '';
+  opnameCorrectDetail = null;
+  opnameCorrectQty = {};
+  opnameCorrectLoading = true;
+  goto('opname-correct');
+  loadOpnameCorrectDetail(locationId, periodKey);
+}
+async function loadOpnameCorrectDetail(locationId, periodKey){
+  try{
+    const snap = await db.doc('opnameDetails/' + periodKey + '__' + locationId).get();
+    opnameCorrectDetail = (snap && snap.exists) ? snap.data() : null;
+    if(opnameCorrectDetail){
+      opnameCorrectQty = {};
+      (opnameCorrectDetail.items||[]).forEach(it=>{
+        const item = itemById(it.itemId);
+        opnameCorrectQty[it.itemId] = item ? opnameDisplayQty(item, it.physicalQty||0) : (it.physicalQty||0);
+      });
+    }
+  }catch(err){
+    opnameCorrectDetail = null;
+    toast(err.message || 'Gagal memuat data opname yang akan dikoreksi.', true);
+  }
+  opnameCorrectLoading = false;
+  if(state.view === 'opname-correct') render();
+}
+function setOpnameCorrectSearch(v){ state.opnameCorrectSearch = v; render(); }
+function opnameCorrectUpdateQty(itemId, value){
+  opnameCorrectQty[itemId] = parseFloat(value) || 0;
+  const detail = opnameCorrectDetail;
+  const row = detail && detail.items.find(it=>it.itemId===itemId);
+  const item = itemById(itemId);
+  if(row && item){
+    const newCanonical = srHasSmallUnit(item) ? opnameCorrectQty[itemId] / item.conversionQty : opnameCorrectQty[itemId];
+    const diff = Math.round((newCanonical - (row.physicalQty||0)) * 1000) / 1000;
+    const cell = document.getElementById('opnameCorrectDiff-' + itemId);
+    if(cell){
+      cell.style.color = diff===0 ? 'var(--text-faint)' : (diff>0 ? 'var(--success)' : 'var(--danger)');
+      cell.textContent = diff===0 ? '—' : (diff>0?'+':'')+fmtNum(diff);
+    }
+  }
+}
+function renderOpnameCorrect(){
+  const locationId = state.opnameCorrectLocation;
+  const periodKey = state.opnameCorrectPeriod;
+  const role = currentRole();
+  if(role.kind!=='master'){
+    document.getElementById('content').innerHTML = `<div class="lock-note">Hanya Master User yang dapat mengoreksi opname yang sudah terkunci.</div>`;
+    return;
+  }
+  if(opnameCorrectLoading){
+    document.getElementById('content').innerHTML = `<div class="empty-row" style="padding:22px 16px;">Memuat data opname…</div>`;
+    return;
+  }
+  const detail = opnameCorrectDetail;
+  if(!detail){
+    document.getElementById('content').innerHTML = `<div class="lock-note">Data opname terkunci untuk ${escapeHtml(whName(locationId))} — ${escapeHtml(periodLabel(periodKey))} tidak ditemukan.</div>`;
+    return;
+  }
+  const q = (state.opnameCorrectSearch||'').toLowerCase();
+  let items = (detail.items||[]).filter(it=>!it.addedType); // barang tambahan manual tidak pernah menyentuh stok -- tidak dikoreksi di sini
+  if(q) items = items.filter(it=>(it.itemName||'').toLowerCase().includes(q) || (it.kode||'').toLowerCase().includes(q));
+  items = items.slice().sort((a,b)=>(a.itemName||'').localeCompare(b.itemName||''));
+
+  document.getElementById('content').innerHTML = `
+    <div class="lock-note" style="margin-bottom:14px; background:var(--warning-tint); color:var(--warning); border:1px solid var(--warning);">
+      Mengoreksi hasil opname <b>${escapeHtml(whName(locationId))} — ${escapeHtml(periodLabel(periodKey))}</b> yang sudah dikunci dan menjadi data final. Stok saat ini hanya akan disesuaikan sebesar <b>selisih</b> antara angka lama dan angka baru di sini — transaksi lain yang terjadi setelah dikunci tidak akan ketimpa. Gunakan hanya untuk memperbaiki kesalahan input.
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Koreksi Hitung Fisik — ${escapeHtml(whName(locationId))}</h3></div>
+      <div class="filter-row">
+        <input type="text" placeholder="Cari barang…" value="${escapeHtml(state.opnameCorrectSearch||'')}" oninput="setOpnameCorrectSearch(this.value)">
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Barang</th><th>Satuan</th><th class="num">Tercatat (Terkunci)</th><th class="num">Koreksi</th><th class="num">Perubahan</th></tr></thead>
+          <tbody>
+            ${items.length===0 ? `<tr class="empty-row"><td colspan="5">Tidak ada barang yang cocok.</td></tr>` :
+              items.map(it=>{
+                const item = itemById(it.itemId);
+                const useSmall = item && srHasSmallUnit(item);
+                const unit = item ? (useSmall ? item.smallUnit : item.uom) : (it.uom||'');
+                const recorded = item ? opnameDisplayQty(item, it.physicalQty||0) : (it.physicalQty||0);
+                const current = opnameCorrectQty.hasOwnProperty(it.itemId) ? opnameCorrectQty[it.itemId] : recorded;
+                const newCanonical = (item && useSmall) ? (current / item.conversionQty) : current;
+                const diff = Math.round(((newCanonical||0) - (it.physicalQty||0)) * 1000) / 1000;
+                const diffColor = diff===0 ? 'var(--text-faint)' : (diff>0 ? 'var(--success)' : 'var(--danger)');
+                return `<tr>
+                  <td class="cell-title">${escapeHtml(it.itemName)}</td>
+                  <td>${escapeHtml(unit||'')}${useSmall ? `<div class="cell-sub">1 ${escapeHtml(item.uom)} = ${fmtNum(item.conversionQty)} ${escapeHtml(item.smallUnit)}</div>` : ''}</td>
+                  <td class="num">${fmtNum(recorded)}</td>
+                  <td class="num"><input type="number" style="width:96px; text-align:right;" value="${current}" oninput="opnameCorrectUpdateQty('${it.itemId}', this.value)"></td>
+                  <td class="num" id="opnameCorrectDiff-${it.itemId}" style="color:${diffColor}; font-weight:700;">${diff===0?'—':(diff>0?'+':'')+fmtNum(diff)}</td>
+                </tr>`;
+              }).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="action-row" style="justify-content:flex-end; gap:8px;">
+      <button class="btn btn-outline" onclick="backToOpnameList()">Batal</button>
+      <button class="btn btn-primary" onclick="confirmSaveOpnameCorrection()">Simpan Koreksi</button>
+    </div>
+  `;
+}
+function confirmSaveOpnameCorrection(){
+  const detail = opnameCorrectDetail;
+  if(!detail) return;
+  const changed = (detail.items||[]).filter(it=>{
+    if(it.addedType) return false;
+    if(!opnameCorrectQty.hasOwnProperty(it.itemId)) return false;
+    const item = itemById(it.itemId);
+    const newCanonical = (item && srHasSmallUnit(item)) ? (opnameCorrectQty[it.itemId] / item.conversionQty) : opnameCorrectQty[it.itemId];
+    return Math.abs((newCanonical||0) - (it.physicalQty||0)) > 0.0001;
+  });
+  if(changed.length===0){ toast('Tidak ada perubahan untuk disimpan.'); return; }
+  openConfirm(
+    'Simpan Koreksi Opname',
+    'Ini akan mengubah ' + changed.length + ' barang pada data opname yang sudah final untuk ' + whName(state.opnameCorrectLocation) + ' — ' + periodLabel(state.opnameCorrectPeriod) + ', dan menyesuaikan stok saat ini sebesar selisihnya saja. Pastikan koreksi ini benar sebelum melanjutkan. Lanjutkan?',
+    ()=>saveOpnameCorrection(),
+    'Simpan Koreksi', true
+  );
+}
+async function saveOpnameCorrection(){
+  const locationId = state.opnameCorrectLocation;
+  const periodKey = state.opnameCorrectPeriod;
+  const detail = opnameCorrectDetail;
+  if(!detail) return;
+  try{
+    const isStorage = isStorageWarehouse(locationId);
+    const newItems = detail.items.map(it=>({...it, peruntukanQty: it.peruntukanQty ? {...it.peruntukanQty} : it.peruntukanQty}));
+    const peruntukanValues = detail.peruntukanValues ? {...detail.peruntukanValues} : null;
+    for(const it of newItems){
+      if(it.addedType) continue;
+      if(!opnameCorrectQty.hasOwnProperty(it.itemId)) continue;
+      const item = itemById(it.itemId);
+      if(!item) continue;
+      const newCanonical = srHasSmallUnit(item) ? (opnameCorrectQty[it.itemId] / item.conversionQty) : opnameCorrectQty[it.itemId];
+      const delta = Math.round((newCanonical - (it.physicalQty||0)) * 1000) / 1000;
+      if(Math.abs(delta) < 0.0001) continue;
+      const peruntukan = isStorage ? 'mix' : null;
+      await adjustStock(locationId, it.itemId, delta, peruntukan);
+      await logTx({
+        type:'opname', status:'completed',
+        itemId: it.itemId, itemName: it.itemName, uom: item.uom, qty: Math.abs(delta),
+        toWarehouseId: delta>0 ? locationId : null, toWarehouseName: delta>0 ? whName(locationId) : null,
+        fromWarehouseId: delta<0 ? locationId : null, fromWarehouseName: delta<0 ? whName(locationId) : null,
+        note: 'Koreksi Master atas Stock Opname ' + periodLabel(periodKey) + ' (terkunci): ' + fmtNum(it.physicalQty||0) + ' → ' + fmtNum(newCanonical) + ' ' + item.uom,
+      });
+      it.nilaiFisik = newCanonical * (it.price||0);
+      it.physicalQty = newCanonical;
+      it.selisih = Math.round((newCanonical - (it.systemQty||0)) * 1000) / 1000;
+      it.nilaiSelisih = it.selisih * (it.price||0);
+      if(isStorage && it.peruntukanQty){
+        it.peruntukanQty.mix = (it.peruntukanQty.mix||0) + delta;
+        if(peruntukanValues) peruntukanValues.mix = (peruntukanValues.mix||0) + delta*(it.price||0);
+      }
+    }
+    const totalValue = newItems.reduce((s,it)=> s + (it.addedType ? 0 : (it.nilaiFisik||0)), 0);
+    const systemTotalValue = newItems.reduce((s,it)=> s + (it.addedType ? 0 : (it.systemQty||0)*(it.price||0)), 0);
+    const totalUsedValue = systemTotalValue - totalValue;
+
+    await db.doc('opnameDetails/' + periodKey + '__' + locationId).update({
+      items: newItems, totalValue, totalUsedValue,
+      ...(peruntukanValues ? {peruntukanValues} : {}),
+      correctedAt: new Date().toISOString(), correctedBy: currentUserName || currentRole().name,
+    });
+
+    const sessionRef = db.doc('opnameSessions/' + periodKey);
+    const sessionSnap = await sessionRef.get();
+    const session = (sessionSnap && sessionSnap.exists) ? sessionSnap.data() : null;
+    if(session){
+      const mergedValues = { ...(session.locationValues||{}), [locationId]: totalValue };
+      const mergedUsed = { ...(session.locationUsedValues||{}), [locationId]: totalUsedValue };
+      const patch = { locationValues: mergedValues, locationUsedValues: mergedUsed, updatedAt: new Date().toISOString() };
+      if(session.status==='selesai'){
+        // Periode ini sudah difinalisasi (Net Sales terisi, dipakai Laporan
+        // R2/R3/R4) -- groupValues yang didenormalisasi ke sana ikut
+        // dihitung ulang supaya laporan-laporan itu tidak jadi basi.
+        patch.totalValue = Object.values(mergedValues).reduce((s,v)=>s+v,0);
+        patch.groupValues = await computeGroupValuesFromOpnameDetails(periodKey);
+      }
+      await sessionRef.update(patch);
+    }
+    delete state.reportOpname.histCache[periodKey]; // Laporan Stock Opname (R1) harus baca ulang, bukan versi lama yang mungkin sudah ke-cache
+    toast('Koreksi opname ' + whName(locationId) + ' tersimpan.');
+    backToOpnameList();
+  }catch(err){
+    toast(err.message || 'Gagal menyimpan koreksi. Coba lagi.', true);
+  }
 }
 function openAddWipModal(){
   const locationId = state.opnameCountLocation;
@@ -3401,21 +3736,6 @@ function submitAddOpnameItem(){
   renderOpnameCounting();
   scheduleOpnameDraftSave();
   toast('Barang ditambahkan ke daftar hitung (tercatat di opname, tidak memengaruhi stok).');
-}
-async function submitOpnameCounting(){
-  const locationId = state.opnameCountLocation;
-  const periodKey = state.opnamePeriod || currentPeriodKey();
-  const btn = document.getElementById('opnameSubmitBtn');
-  if(btn){ if(btn.disabled) return; btn.disabled = true; }
-  showLoading('Menyimpan hasil opname…');
-  const ok = await actionSubmitOpnameCount(locationId, {...opnameCounts}, periodKey, {...opnameAdded});
-  if(ok){
-    if(opnameDraftSaveTimer){ clearTimeout(opnameDraftSaveTimer); opnameDraftSaveTimer = null; }
-    await deleteOpnameDraft(locationId, periodKey); // finalized -- the draft's job is done
-  }
-  hideLoading();
-  if(ok){ goto('stockopname'); }
-  else if(btn){ btn.disabled = false; }
 }
 function exportOpnameTemplateAll(){
   const periodKey = state.opnamePeriod || currentPeriodKey();
@@ -3605,11 +3925,16 @@ function inDateRange(iso, fromDate, toDate){
 }
 /** Search box + date-range fields, wired to setter function names given by the caller. */
 function searchDateFilterHtml(opts){
+  // `extraActive`: pass true when the page has other filter controls outside
+  // this search/date row (a location/supplier/category <select>, etc.) that
+  // are also cleared by onReset -- so the Reset button still shows up even
+  // when only one of those other filters is active and search/date are both
+  // empty (otherwise there was no way to reset a lone dropdown filter).
   return `<input type="text" id="${opts.onSearch}Input" placeholder="${opts.placeholder||'Cari…'}" value="${escapeHtml(opts.search||'')}" oninput="${opts.onSearch}(this.value)">
     <input type="date" title="Dari tanggal" value="${opts.dateFrom||''}" onchange="${opts.onDateFrom}(this.value)">
     <span style="color:var(--text-faint); font-size:12px;">–</span>
     <input type="date" title="Sampai tanggal" value="${opts.dateTo||''}" onchange="${opts.onDateTo}(this.value)">
-    ${(opts.search || opts.dateFrom || opts.dateTo) ? `<button class="btn btn-sm btn-outline" onclick="${opts.onReset}()">Reset</button>` : ''}`;
+    ${(opts.search || opts.dateFrom || opts.dateTo || opts.extraActive) ? `<button class="btn btn-sm btn-outline" onclick="${opts.onReset}()">Reset Filter</button>` : ''}`;
 }
 function renderStoreRequests(){
   const role = currentRole();
@@ -4603,11 +4928,88 @@ function confirmDeleteItem(itemId){
 }
 
 /* =========================================================
+   WIP ITEMS (Master Data catalog — WIP Kitchen & WIP Bar)
+   These items never carry real stock/value (see wipReqItems(),
+   grRenderCombo's exclusion of them from Penerimaan Barang, and
+   actionSubmitOpnameCount's addedType handling, which never calls
+   adjustStock/logTx for them) so they don't show up anywhere in
+   Inventory/Stock Opname -- but the business still needs a place to see
+   the full WIP catalog and edit things like price from one screen, which
+   is all this view is for.
+========================================================= */
+function getWipItemsMaster(){
+  let list = state.items.filter(i=>i.category==='WIP Kitchen' || i.category==='WIP Bar');
+  if(state.wipItemsSearch){ const q = state.wipItemsSearch.toLowerCase(); list = list.filter(i => (i.name||'').toLowerCase().includes(q) || (i.kode||'').toLowerCase().includes(q)); }
+  if(state.wipItemsCategory) list = list.filter(i => i.category === state.wipItemsCategory);
+  return list;
+}
+function setWipItemsSearch(v){ state.wipItemsSearch = v; state.wipItemsPage = 1; render(); }
+function setWipItemsCategory(v){ state.wipItemsCategory = v; state.wipItemsPage = 1; render(); }
+function resetWipItemsFilters(){ state.wipItemsSearch=''; state.wipItemsCategory=''; state.wipItemsPage=1; render(); }
+function setWipItemsPage(p){ state.wipItemsPage = p; render(); }
+function renderWipItemsMaster(){
+  const role = currentRole();
+  const editable = canEditMaster(role);
+  const filtered = getWipItemsMaster();
+  const filtersActive = state.wipItemsSearch || state.wipItemsCategory;
+  const totalWip = state.items.filter(i=>i.category==='WIP Kitchen' || i.category==='WIP Bar').length;
+  const pageSize = state.wipItemsPageSize;
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
+  if(state.wipItemsPage > totalPages) state.wipItemsPage = totalPages;
+  if(state.wipItemsPage < 1) state.wipItemsPage = 1;
+  const pageItems = filtered.slice((state.wipItemsPage-1)*pageSize, (state.wipItemsPage-1)*pageSize + pageSize);
+
+  document.getElementById('content').innerHTML = `
+    <div class="lock-note">Barang WIP tidak memiliki stok/nilai di Inventory dan tidak masuk Stock Opname — halaman ini hanya untuk melihat &amp; mengubah data master (termasuk harga) barang WIP Kitchen dan WIP Bar.</div>
+    <div class="action-row">
+      ${editable ? `<button class="btn btn-primary" onclick="openAddItemModal('WIP Kitchen')">${ICONS.plus} Tambah Barang WIP</button>` : ''}
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Barang WIP</h3><span class="hint">${filtersActive ? filtered.length + ' dari ' + totalWip : totalWip} barang WIP</span></div>
+      <div class="filter-row">
+        <input type="text" style="min-width:200px;" placeholder="Cari nama atau kode…" value="${escapeHtml(state.wipItemsSearch)}" oninput="setWipItemsSearch(this.value)">
+        <select onchange="setWipItemsCategory(this.value)">
+          <option value="">Semua Kategori WIP</option>
+          <option value="WIP Kitchen" ${state.wipItemsCategory==='WIP Kitchen'?'selected':''}>WIP Kitchen</option>
+          <option value="WIP Bar" ${state.wipItemsCategory==='WIP Bar'?'selected':''}>WIP Bar</option>
+        </select>
+        ${filtersActive ? `<button class="btn btn-sm btn-outline" onclick="resetWipItemsFilters()">Reset</button>` : ''}
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Kode</th><th>Nama Barang</th><th>Kategori</th><th>Satuan</th><th class="num">Harga/Satuan</th>${editable?'<th></th>':''}</tr></thead>
+          <tbody>
+            ${pageItems.length===0 ? `<tr class="empty-row"><td colspan="${editable?6:5}">${totalWip===0?'Belum ada barang WIP.':'Tidak ada barang WIP yang cocok dengan filter.'}</td></tr>` :
+              pageItems.map(i=>`<tr>
+                <td class="code-mono">${escapeHtml(i.kode||'—')}</td>
+                <td class="cell-title">${escapeHtml(i.name)}</td>
+                <td>${escapeHtml(i.category||'—')}</td>
+                <td>${escapeHtml(i.uom||'—')}</td>
+                <td class="num">${i.lastPrice?fmtIDR(i.lastPrice):'—'}</td>
+                ${editable ? `<td><div style="display:flex; gap:6px;">
+                    <button class="btn btn-sm btn-outline" onclick='openEditItemModal(${JSON.stringify(i.id)})'>Edit</button>
+                    <button class="btn btn-sm btn-danger-outline" onclick='confirmDeleteItem(${JSON.stringify(i.id)})'>Hapus</button>
+                  </div></td>` : ''}
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${paginationHtml(state.wipItemsPage, totalPages, filtered.length, pageSize, 'setWipItemsPage', 'barang WIP')}
+    </div>
+  `;
+}
+
+/* =========================================================
    SUPPLIERS (Master Data)
 ========================================================= */
+/* Same fix as nextItemCode(): suggest max-existing-SUP-number + 1 rather
+   than count+1, so a deleted supplier or a gap in the numbering doesn't
+   produce a code that collides with (or falls behind) one already in use. */
 function nextSupplierCode(){
-  const existing = new Set((state.suppliers||[]).map(s=>(s.kode||'').toUpperCase()));
-  let n = (state.suppliers||[]).length + 1, code;
+  const suppliers = state.suppliers || [];
+  const nums = suppliers.map(s=>{ const m = /^SUP-(\d+)$/i.exec((s.kode||'').trim()); return m ? parseInt(m[1],10) : null; }).filter(n=>n!==null);
+  const existing = new Set(suppliers.map(s=>(s.kode||'').toUpperCase()));
+  let n = nums.length ? Math.max(...nums)+1 : 1, code;
   do{ code = 'SUP-' + String(n).padStart(3,'0'); n++; } while(existing.has(code));
   return code;
 }
@@ -5137,6 +5539,25 @@ function liveReport1Groups(){
   });
   return buildOpnameReport1Groups(direct, storage);
 }
+/* The one-time August 2026 migration wrote opnameDetails.physicalQty as the
+   RAW quantity actually counted (e.g. grams for an item counted by weight),
+   while `price` is always per the item's master/big unit -- so for any item
+   with a smallUnit conversion, physicalQty*price overstates value by the
+   item's conversionQty (a jerigen of Kecap Bango counted as "18600" ends up
+   priced as 18600 jerigen instead of the 3 it actually was). This is why
+   Laporan Stock Opname's grand total could read Rp137 miliar against the
+   correct ~Rp236 juta shown by the per-location breakdown elsewhere.
+   `nilaiFisik` was always computed correctly at write time though (from the
+   already-canonical `physical` variable, see actionSubmitOpnameCount) --
+   for both this historical import AND every opname submitted through the
+   app since -- so derive the canonical quantity back out of it
+   (nilaiFisik / price) instead of trusting the raw physicalQty field. This
+   is a safe no-op for future opname sessions: there, physicalQty is already
+   canonical and nilaiFisik = physicalQty*price by construction, so
+   nilaiFisik/price returns physicalQty exactly. */
+function historicalCanonicalQty(it){
+  return (it.price>0) ? (it.nilaiFisik||0)/it.price : (it.physicalQty||0);
+}
 function historicalReport1Groups(periodKey){
   const details = state.reportOpname.histCache[periodKey];
   if(!details) return null;
@@ -5145,7 +5566,7 @@ function historicalReport1Groups(periodKey){
     if(!d || !d.items) return [];
     return d.items.map(it=>{
       const master = itemById(it.itemId);
-      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, qty: it.physicalQty, price: it.price||0 };
+      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, qty: historicalCanonicalQty(it), price: it.price||0 };
     });
   };
   const storage = swId => {
@@ -5155,7 +5576,16 @@ function historicalReport1Groups(periodKey){
       const master = itemById(it.itemId);
       /* older opnameDetails saved before peruntukanQty existed: treat the
          whole counted quantity as Mix Use rather than guessing an allocation. */
-      const peruntukanQty = it.peruntukanQty || { mix: it.physicalQty };
+      const rawPeruntukanQty = it.peruntukanQty || { mix: it.physicalQty };
+      // Each peruntukan slice was counted the same (possibly small-unit) way,
+      // so its proportions are still trustworthy even though the absolute
+      // scale might not be -- rescale every slice by the same correction
+      // factor that fixes the item's total, rather than discarding the split.
+      const rawSum = Object.values(rawPeruntukanQty).reduce((s,v)=>s+(v||0), 0);
+      const correctTotal = historicalCanonicalQty(it);
+      const scale = rawSum > 0 ? (correctTotal / rawSum) : 1;
+      const peruntukanQty = {};
+      Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = (rawPeruntukanQty[k]||0) * scale; });
       return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, peruntukanQty, price: it.price||0 };
     });
   };
@@ -5697,15 +6127,17 @@ function renderReportOpname(){
 ========================================================= */
 function setReportMasukLocation(v){ state.reportMasukLocation = v; state.reportMasukPage=1; render(); }
 function setReportMasukSupplier(v){ state.reportMasukSupplier = v; state.reportMasukPage=1; render(); }
+function setReportMasukCategory(v){ state.reportMasukCategory = v; state.reportMasukPage=1; render(); }
 function setReportMasukPage(p){ state.reportMasukPage = p; render(); }
 function setReportMasukSearch(v){ state.reportMasukSearch = v; state.reportMasukPage=1; render(); }
 function setReportMasukDateFrom(v){ state.reportMasukDateFrom = v; state.reportMasukPage=1; render(); }
 function setReportMasukDateTo(v){ state.reportMasukDateTo = v; state.reportMasukPage=1; render(); }
-function resetReportMasukFilters(){ state.reportMasukSearch=''; state.reportMasukDateFrom=''; state.reportMasukDateTo=''; state.reportMasukLocation=''; state.reportMasukSupplier=''; state.reportMasukPage=1; render(); }
+function resetReportMasukFilters(){ state.reportMasukSearch=''; state.reportMasukDateFrom=''; state.reportMasukDateTo=''; state.reportMasukLocation=''; state.reportMasukSupplier=''; state.reportMasukCategory=''; state.reportMasukPage=1; render(); }
 function renderReportMasuk(){
   let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
   if(state.reportMasukLocation) docs = docs.filter(d=>d.lines.some(l=>l.toWarehouseId===state.reportMasukLocation));
   if(state.reportMasukSupplier) docs = docs.filter(d=>d.lines[0].supplierId===state.reportMasukSupplier);
+  if(state.reportMasukCategory) docs = docs.filter(d=>d.lines.some(l=>{ const it=itemById(l.itemId); return it && it.category===state.reportMasukCategory; }));
   if(state.reportMasukSearch){
     const q = state.reportMasukSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].supplierName||'').toLowerCase().includes(q));
@@ -5724,9 +6156,10 @@ function renderReportMasuk(){
       <div class="filter-row">
         <select onchange="setReportMasukLocation(this.value)"><option value="">Semua Lokasi</option>${WAREHOUSES.map(w=>`<option value="${w.id}" ${state.reportMasukLocation===w.id?'selected':''}>${w.name}</option>`).join('')}</select>
         <select onchange="setReportMasukSupplier(this.value)"><option value="">Semua Supplier</option>${(state.suppliers||[]).map(s=>`<option value="${s.id}" ${state.reportMasukSupplier===s.id?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}</select>
+        <select onchange="setReportMasukCategory(this.value)"><option value="">Semua Kategori</option>${ITEM_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${state.reportMasukCategory===c?'selected':''}>${escapeHtml(c)}</option>`).join('')}</select>
       </div>
       <div class="filter-row">
-        ${searchDateFilterHtml({placeholder:'Cari No. Penerimaan, barang, atau supplier…', search:state.reportMasukSearch, dateFrom:state.reportMasukDateFrom, dateTo:state.reportMasukDateTo, onSearch:'setReportMasukSearch', onDateFrom:'setReportMasukDateFrom', onDateTo:'setReportMasukDateTo', onReset:'resetReportMasukFilters'})}
+        ${searchDateFilterHtml({placeholder:'Cari No. Penerimaan, barang, atau supplier…', search:state.reportMasukSearch, dateFrom:state.reportMasukDateFrom, dateTo:state.reportMasukDateTo, onSearch:'setReportMasukSearch', onDateFrom:'setReportMasukDateFrom', onDateTo:'setReportMasukDateTo', onReset:'resetReportMasukFilters', extraActive: !!(state.reportMasukLocation || state.reportMasukSupplier || state.reportMasukCategory)})}
       </div>
       <div class="table-scroll">
         <table>
@@ -5779,7 +6212,7 @@ function renderReportKeluar(){
         <select onchange="setReportKeluarLocation(this.value)"><option value="">Semua Lokasi</option>${WAREHOUSES.map(w=>`<option value="${w.id}" ${state.reportKeluarLocation===w.id?'selected':''}>${w.name}</option>`).join('')}</select>
       </div>
       <div class="filter-row">
-        ${searchDateFilterHtml({placeholder:'Cari No. Transfer, No. SR, atau barang…', search:state.reportKeluarSearch, dateFrom:state.reportKeluarDateFrom, dateTo:state.reportKeluarDateTo, onSearch:'setReportKeluarSearch', onDateFrom:'setReportKeluarDateFrom', onDateTo:'setReportKeluarDateTo', onReset:'resetReportKeluarFilters'})}
+        ${searchDateFilterHtml({placeholder:'Cari No. Transfer, No. SR, atau barang…', search:state.reportKeluarSearch, dateFrom:state.reportKeluarDateFrom, dateTo:state.reportKeluarDateTo, onSearch:'setReportKeluarSearch', onDateFrom:'setReportKeluarDateFrom', onDateTo:'setReportKeluarDateTo', onReset:'resetReportKeluarFilters', extraActive: !!state.reportKeluarLocation})}
       </div>
       <div class="table-scroll">
         <table>
@@ -6197,11 +6630,17 @@ function grOnItemNameInput(idx, value){
   const priceInput = document.getElementById('grPrice'+idx);
   if(priceInput && receivingLines[idx].price) priceInput.value = Number(receivingLines[idx].price).toLocaleString('id-ID');
 }
+/* WIP items (category WIP Kitchen / WIP Bar) never carry real stock and
+   never move through Penerimaan Barang or Permintaan Barang -- they arrive
+   only via Permintaan WIP / Stock Opname "Tambah Barang WIP". Shared by
+   both those forms' combo boxes so neither one can suggest them. */
+function nonWipItemsPool(){ return state.items.filter(i=>i.category!=='WIP Kitchen' && i.category!=='WIP Bar'); }
 function grRenderCombo(idx, query){
   const box = document.getElementById('grCombo'+idx);
   if(!box) return;
   const q = (query||'').trim().toLowerCase();
-  const matches = (q ? state.items.filter(i=>i.name.toLowerCase().includes(q)) : state.items).slice(0,300);
+  const receivablePool = nonWipItemsPool();
+  const matches = (q ? receivablePool.filter(i=>i.name.toLowerCase().includes(q)) : receivablePool).slice(0,300);
   if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
   box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="grPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
   box.style.display = 'block';
@@ -6512,7 +6951,11 @@ function srRenderCombo(idx, query){
   const box = document.getElementById('srCombo'+idx);
   if(!box) return;
   const q = (query||'').trim().toLowerCase();
-  const matches = (q ? state.items.filter(i=>i.name.toLowerCase().includes(q)) : state.items).slice(0,300);
+  // Permintaan Barang moves real stock out of Gudang Utama -- WIP items
+  // have none, so they're excluded here entirely (both WIP Kitchen and WIP
+  // Bar). WIP hand-over/requests are tracked separately via Permintaan WIP.
+  const pool = nonWipItemsPool();
+  const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
   if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
   box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="srPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
   box.style.display = 'block';
@@ -6863,13 +7306,26 @@ async function submitUsage(){
 }
 
 /* --- Items master: add / edit --- */
-function openAddItemModal(){
+function updateKodePlaceholder(prefix){
+  const catEl = document.getElementById(prefix+'Category');
+  const kodeEl = document.getElementById(prefix+'Kode');
+  if(!catEl || !kodeEl) return;
+  kodeEl.placeholder = nextItemCode(catEl.value);
+}
+function openAddItemModal(presetCategory){
   if(!canEditMaster(currentRole())){ return; }
+  // Called from the Barang WIP page with presetCategory 'WIP Kitchen' --
+  // in that case this is a dedicated "Tambah Barang WIP" flow, so the
+  // Kategori dropdown should only offer the two WIP categories, not the
+  // full product catalog (which would let a WIP item accidentally get
+  // filed as a regular, stock-tracked item or vice versa).
+  const isWipOnly = presetCategory === 'WIP Kitchen' || presetCategory === 'WIP Bar';
+  const categoryOptions = isWipOnly ? ['WIP Kitchen','WIP Bar'] : ITEM_CATEGORIES;
   const body = `
     <div id="miError"></div>
-    <div class="field"><label>Kode Barang</label><input type="text" id="miKode" placeholder="${nextItemCode()}"></div>
+    <div class="field"><label>Kode Barang</label><input type="text" id="miKode" placeholder="${nextItemCode(presetCategory||'')}"></div>
     <div class="field"><label>Nama Barang</label><input type="text" id="miName" placeholder="cth. Beras Premium 5kg"></div>
-    <div class="field"><label>Kategori</label><select id="miCategory">${ITEM_CATEGORIES.map(c=>`<option value="${c}">${c}</option>`).join('')}</select></div>
+    <div class="field"><label>Kategori</label><select id="miCategory" onchange="updateKodePlaceholder('mi')">${categoryOptions.map(c=>`<option value="${c}" ${presetCategory===c?'selected':''}>${c}</option>`).join('')}</select></div>
     <div class="two-col">
       <div class="field"><label>Satuan</label><select id="miUom" onchange="updateSmallUnitHint('mi')">${uomSelectOptions('pcs')}</select></div>
       <div class="field"><label>Harga/Satuan</label><input type="text" inputmode="numeric" id="miPrice" placeholder="0" oninput="formatPriceInput(this); updateSmallUnitHint('mi');"></div>
@@ -6883,7 +7339,7 @@ function openAddItemModal(){
     <div class="field"><label>Reorder Level</label><input type="number" id="miReorder" inputmode="decimal" min="0" step="any" placeholder="0"></div>
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddItem()">Simpan</button>`;
-  openModal('Tambah Barang', body, foot);
+  openModal(isWipOnly ? 'Tambah Barang WIP' : 'Tambah Barang', body, foot);
   updateSmallUnitHint('mi');
 }
 function updateSmallUnitHint(prefix){
@@ -6920,9 +7376,9 @@ function openEditItemModal(itemId){
   if(!item) return;
   const body = `
     <div id="meError"></div>
-    <div class="field"><label>Kode Barang</label><input type="text" id="meKode" value="${escapeHtml(item.kode||'')}" placeholder="${nextItemCode()}"></div>
+    <div class="field"><label>Kode Barang</label><input type="text" id="meKode" value="${escapeHtml(item.kode||'')}" placeholder="${nextItemCode(item.category)}"></div>
     <div class="field"><label>Nama Barang</label><input type="text" id="meName" value="${escapeHtml(item.name)}"></div>
-    <div class="field"><label>Kategori</label><select id="meCategory">${ITEM_CATEGORIES.map(c=>`<option value="${c}" ${c===item.category?'selected':''}>${c}</option>`).join('')}</select></div>
+    <div class="field"><label>Kategori</label><select id="meCategory" onchange="updateKodePlaceholder('me')">${ITEM_CATEGORIES.map(c=>`<option value="${c}" ${c===item.category?'selected':''}>${c}</option>`).join('')}</select></div>
     <div class="two-col">
       <div class="field"><label>Satuan</label><select id="meUom" onchange="updateSmallUnitHint('me')">${uomSelectOptions(item.uom)}</select></div>
       <div class="field"><label>Harga/Satuan</label><input type="text" inputmode="numeric" id="mePrice" value="${item.lastPrice ? Number(item.lastPrice).toLocaleString('id-ID') : ''}" placeholder="0" oninput="formatPriceInput(this); updateSmallUnitHint('me');"></div>
@@ -7032,7 +7488,6 @@ async function confirmImport(){
 /* =========================================================
    AUTH / LOGIN SCREEN
 ========================================================= */
-let demoListOpen = false;
 function showApp(){
   document.getElementById('loginScreen').style.display = 'none';
   if(!dbInitStarted){
@@ -7068,7 +7523,6 @@ function showLogin(){
   document.getElementById('loginScreen').style.display = 'flex';
   renderLogin();
 }
-function toggleDemoList(){ demoListOpen = !demoListOpen; renderLogin(); }
 function passwordFieldHtml(id, label, opts){
   opts = opts || {};
   return `<div class="field"><label>${label}</label>
@@ -7089,25 +7543,15 @@ function togglePasswordField(id, btn){
   if(input.setSelectionRange){ const len = input.value.length; input.setSelectionRange(len, len); }
 }
 function renderLogin(errorMsg){
-  const grouped = {};
-  ROLES.forEach(r=>{
-    const u = BASE_ACCOUNTS.find(x=>x.roleId===r.id);
-    (grouped[r.group] = grouped[r.group]||[]).push(`<div>${escapeHtml(r.name)}</div><div><b>${u.username}</b></div>`);
-  });
-  const demoRowsHtml = Object.keys(grouped).map(g=>`<div style="margin-top:8px; font-weight:800; color:var(--text);">${g}</div><div class="login-demo-grid">${grouped[g].join('')}</div>`).join('');
   document.getElementById('loginScreen').innerHTML = `
     <img class="login-logo" src="${ALIRE_LOGO_SRC}" alt="Alire">
     <div class="login-card">
       <h1>Masuk</h1>
       <p class="sub">Masukkan username dan password untuk mengakses sistem inventory.</p>
       <div id="loginError">${errorMsg ? `<div class="form-error">${escapeHtml(errorMsg)}</div>` : ''}</div>
-      <div class="field"><label>Username</label><input type="text" id="loginUsername" placeholder="mis. receiving" autocomplete="username" onkeydown="if(event.key==='Enter') document.getElementById('loginPassword').focus()"></div>
+      <div class="field"><label>Username</label><input type="text" id="loginUsername" placeholder="Username" autocomplete="username" onkeydown="if(event.key==='Enter') document.getElementById('loginPassword').focus()"></div>
       ${passwordFieldHtml('loginPassword', 'Password', {autocomplete:'current-password', onEnter:'submitLogin()'})}
       <button class="btn btn-primary" onclick="submitLogin()">Masuk</button>
-      <div class="login-demo">
-        <button class="login-demo-toggle" onclick="toggleDemoList()">${demoListOpen ? 'Sembunyikan' : 'Lihat'} akun demo</button>
-        ${demoListOpen ? `<div class="login-demo-list"><div class="ldl-pass">Password semua akun demo: ${DEMO_PASSWORD}</div>${demoRowsHtml}</div>` : ''}
-      </div>
     </div>
   `;
   document.getElementById('loginUsername').focus();
@@ -7128,9 +7572,10 @@ function logout(){ localStorage.removeItem('inv_auth_user'); authedUsername = nu
 ========================================================= */
 const VIEW_PERM = {
   dashboard: canViewDashboard, inventory: canViewInventory, stockopname: canManageGudang,
-  receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData,
+  receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData, wipitems: canViewMasterData,
   'report-masuk': canViewOpsReports, 'report-keluar': canViewOpsReports, lowstock: canViewOpsReports, 'report-divisi': canViewReports,
   'report-opname': canViewReports, wiprequests: canSeeWipNav, 'report-wip': canSeeWipNav,
+  'opname-correct': role => role.kind==='master',
 };
 function defaultViewForRole(role){
   return canViewDashboard(role) ? 'dashboard' : 'storerequests';
@@ -7149,8 +7594,8 @@ function render(){
   renderShell();
   const dispatch = {
     dashboard: renderDashboard, inventory: renderInventory, storerequests: renderStoreRequests, wiprequests: renderWipRequests,
-    receiving: renderReceiving, stockopname: renderStokOpname, 'opname-count': renderOpnameCounting,
-    items: renderItemsMaster, suppliers: renderSuppliers, locations: renderLocations,
+    receiving: renderReceiving, stockopname: renderStokOpname, 'opname-count': renderOpnameCounting, 'opname-correct': renderOpnameCorrect,
+    items: renderItemsMaster, suppliers: renderSuppliers, locations: renderLocations, wipitems: renderWipItemsMaster,
     'report-masuk': renderReportMasuk, 'report-keluar': renderReportKeluar, lowstock: renderLowStock, 'report-divisi': renderReportDivisi,
     'report-opname': renderReportOpname, 'report-wip': renderReportWip,
     setting: renderSetting, 'activity-log': renderActivityLog,
