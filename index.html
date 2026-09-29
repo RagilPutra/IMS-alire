@@ -907,7 +907,7 @@ const NAV = [
   {id:'items', label:'Barang', icon:'list', section:'MASTER DATA', perm: canViewMasterData},
   {id:'suppliers', label:'Supplier', icon:'truck', section:'MASTER DATA', perm: canViewSuppliers},
   {id:'locations', label:'Lokasi', icon:'pin', section:'MASTER DATA', perm: canViewMasterData},
-  {id:'wipitems', label:'Barang WIP', icon:'utensils', section:'MASTER DATA', perm: canViewMasterData},
+  {id:'wipitems', label:'Barang WIP', icon:'utensils', section:'MASTER DATA', perm: canViewWipItems},
   {id:'report-masuk', label:'Barang Masuk', icon:'inflow', section:'LAPORAN', perm: canViewOpsReports},
   {id:'report-keluar', label:'Barang Bergerak', icon:'move', section:'LAPORAN', perm: canViewOpsReports},
   {id:'report-wip', label:'Laporan Pencatatan WIP', icon:'utensils', section:'LAPORAN', perm: canSeeWipNav},
@@ -949,6 +949,15 @@ const ICONS = {
   eye:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 12S5 5 12 5s10.5 7 10.5 7-3.5 7-10.5 7S1.5 12 1.5 12z"/><circle cx="12" cy="12" r="3"/></svg>',
   eyeoff:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c7 0 10.5 7 10.5 7a13.5 13.5 0 0 1-3.15 4.15M6.6 6.6C3.4 8.6 1.5 12 1.5 12s3.5 7 10.5 7a10.4 10.4 0 0 0 4.9-1.2"/><path d="M9.5 9.6a3 3 0 0 0 4.2 4.2"/></svg>',
 };
+
+// Tombol Unduh PDF/Unduh Excel yang seragam untuk semua menu laporan: selalu
+// tampil (bukan disembunyikan) supaya fiturnya terlihat ada, tapi abu-abu dan
+// tidak bisa diklik (.btn:disabled) saat belum ada data untuk diekspor.
+function reportDownloadBtns(hasData, pdfOnclick, excelOnclick){
+  const dis = hasData ? '' : 'disabled';
+  const t = hasData ? '' : ' title="Tidak ada data untuk diekspor"';
+  return `<button class="btn btn-sm btn-outline" ${dis} onclick="${pdfOnclick}"${t}>${ICONS.download} Unduh PDF</button><button class="btn btn-sm btn-outline" ${dis} onclick="${excelOnclick}"${t}>${ICONS.download} Unduh Excel</button>`;
+}
 
 /* =========================================================
    STATE
@@ -1039,6 +1048,13 @@ function canViewMasterData(role){ return role.kind==='master' || role.kind==='re
    to Master/Receiving. */
 function canViewSuppliers(role){ return canViewMasterData(role) || role.id==='office'; }
 function canEditSuppliers(role){ return canEditMaster(role) || role.id==='office'; }
+/* Kitchen Leader also gets a narrow exception, same shape as Office's above:
+   they may VIEW Master Data > Barang WIP (harga & detail barang WIP Kitchen/
+   Bar) without the full Master Data access canViewMasterData grants to
+   Master/Receiving -- they're the one who actually knows this catalog day to
+   day. Still no edit/tambah/hapus there: renderWipItemsMaster() only shows
+   those buttons when canEditMaster(role) is true, which stays master/receiving-only. */
+function canViewWipItems(role){ return canViewMasterData(role) || role.kind==='kitchen_leader'; }
 function canViewReports(role){ return role.kind==='master' || role.kind==='receiving'; }
 /* Office gets a narrow exception: it may view a few operational reports
    (Barang Masuk, Barang Bergerak, Stok Rendah) without the full Master
@@ -1157,6 +1173,38 @@ function formatPriceInput(el){
 }
 function parsePriceInput(value){
   return parseInt(String(value||'').replace(/[^\d]/g, ''), 10) || 0;
+}
+// Sama seperti formatPriceInput/parsePriceInput di atas, tapi untuk kuantitas
+// yang boleh punya desimal (mis. 6,5 kg) -- format tampilan gaya Indonesia:
+// titik = pemisah ribuan, koma = pemisah desimal. Dipakai di input "cek fisik"
+// Stock Opname supaya angka besar (ratusan-ribu gram dsb) gampang dibaca
+// sambil diketik, sama seperti field harga.
+function formatQtyInput(el){
+  const raw = el.value;
+  const firstComma = raw.indexOf(',');
+  let intPart, decPart = null;
+  if(firstComma !== -1){
+    intPart = raw.slice(0, firstComma).replace(/[^\d]/g, '');
+    decPart = raw.slice(firstComma+1).replace(/[^\d]/g, '');
+  } else {
+    intPart = raw.replace(/[^\d]/g, '');
+  }
+  let formatted = intPart === '' ? '' : parseInt(intPart, 10).toLocaleString('id-ID');
+  if(decPart !== null) formatted += ',' + decPart;
+  el.value = formatted;
+}
+function parseQtyInput(value){
+  const s = String(value||'').trim();
+  if(!s) return 0;
+  const n = parseFloat(s.replace(/\./g,'').replace(',', '.'));
+  return isNaN(n) ? 0 : n;
+}
+// Angka murni (bukan string input pengguna) -> teks tampilan gaya Indonesia
+// yang konsisten dengan formatQtyInput, untuk mengisi value awal input saat
+// render ulang (mis. setelah ganti halaman/lokasi).
+function fmtQtyInputValue(n){
+  n = Number(n)||0;
+  return n.toLocaleString('id-ID', {maximumFractionDigits:3});
 }
 function getKnownUoms(){
   const set = new Set(UOM_SUGGESTIONS);
@@ -1338,7 +1386,19 @@ async function initDb(){
 function stockDocId(warehouseId, itemId, peruntukan){
   return isStorageWarehouse(warehouseId) ? (warehouseId + '__' + itemId + '__' + (peruntukan || 'mix')) : (warehouseId + '__' + itemId);
 }
-async function adjustStock(warehouseId, itemId, delta, peruntukan){
+/* opts.allowNegative=true skips the sufficiency check below -- used ONLY by
+   Stock Opname (counting-period submit and the locked-period correction),
+   whose whole purpose is to reset stock to match a verified physical count,
+   so it must always be allowed to complete even if that means the tracked
+   'mix' bucket dips toward/through 0 (shrinkage is intentionally absorbed
+   there -- see comments at its call sites). Every other caller (receiving
+   edits/deletes, manual transfers, Permintaan Barang approval) must NOT
+   silently under-apply a reduction it can't actually cover: that used to
+   floor at 0 with no error, which could let a request get approved (and its
+   destination division credited with stock) for more than the source
+   location actually had -- e.g. two lines for the same item in one
+   Permintaan Barang document, or two approvals racing on the same bucket. */
+async function adjustStock(warehouseId, itemId, delta, peruntukan, opts){
   const docId = stockDocId(warehouseId, itemId, peruntukan);
   const ref = db.doc('stock/' + docId);
   let acquired = false;
@@ -1350,7 +1410,12 @@ async function adjustStock(warehouseId, itemId, delta, peruntukan){
   if(!acquired){ throw new Error('Stok "' + docId + '" sedang diproses transaksi lain. Coba lagi sebentar.'); }
   const snap = await ref.get();
   const cur = snap.exists ? (snap.data().qty || 0) : 0;
-  const next = Math.max(0, Math.round((cur + delta) * 1000) / 1000);
+  const rawNext = Math.round((cur + delta) * 1000) / 1000;
+  if(rawNext < -0.0005 && !(opts && opts.allowNegative)){
+    const item = itemById(itemId);
+    throw new Error('Stok ' + (item?item.name:itemId) + ' di ' + whName(warehouseId) + ' tidak cukup untuk proses ini. Tersedia ' + fmtNum(cur) + ', dibutuhkan ' + fmtNum(-delta) + '.');
+  }
+  const next = Math.max(0, rawNext);
   const doc = { warehouseId, itemId, qty: next, updatedAt: new Date().toISOString() };
   if(isStorageWarehouse(warehouseId)) doc.peruntukan = peruntukan || 'mix';
   await ref.set(doc);
@@ -1381,10 +1446,18 @@ async function moveStockMulti(sourceBuckets, toWarehouseId, itemId){
     }
     await adjustStock(toWarehouseId, itemId, totalQty);
   }catch(err){
+    let allRestored = true;
     for(const bucket of applied){
-      try{ await adjustStock(bucket.warehouseId, itemId, bucket.qty, bucket.peruntukan); }catch(e){}
+      try{ await adjustStock(bucket.warehouseId, itemId, bucket.qty, bucket.peruntukan); }
+      catch(e){ allRestored = false; }
     }
-    throw new Error('Gagal memindahkan stok — bagian yang sudah terlanjur dikurangi sudah dikembalikan. Coba lagi.');
+    if(allRestored){
+      throw new Error((err.message || 'Gagal memindahkan stok') + ' Bagian yang sudah terlanjur dikurangi sudah dikembalikan.');
+    }
+    /* The restore itself failed too -- do NOT claim it was undone. Surface
+       this loudly instead of the old message, which lied about recovery and
+       could leave stock silently short with no one aware. */
+    throw new Error('Gagal memindahkan stok, dan sebagian yang sudah terlanjur dikurangi GAGAL dikembalikan otomatis. Segera cek manual stok barang ini di lokasi terkait sebelum melanjutkan transaksi lain.');
   }
 }
 
@@ -1467,9 +1540,13 @@ async function actionReceivingDoc(payload){
    kept (has _txId) gets its old (warehouse, item, qty, peruntukan) subtracted
    back out, then the edited amount added in; a brand-new line just adds; a
    line removed during editing also gets its old effect subtracted before its
-   transaction record is deleted. adjustStock() itself floors at 0, so this
-   can never push a stock record negative even if the goods already moved on
-   elsewhere -- worst case the count settles at 0 instead of going negative. */
+   transaction record is deleted. adjustStock() now REFUSES (throws) instead
+   of silently flooring at 0 if that reversal can't be fully applied -- e.g.
+   the goods from this line already moved on elsewhere before the edit. That
+   surfaces as a clear error here rather than quietly under-correcting stock
+   with no one aware; lines already processed earlier in this same edit stay
+   applied, so if this throws partway through, re-open the document to see
+   exactly what did and didn't go through before retrying. */
 async function actionEditReceivingDoc(docNumber, payload){
   const existingLines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
@@ -1483,7 +1560,11 @@ async function actionEditReceivingDoc(docNumber, payload){
       const orig = existingLines.find(e=>e.id===line._txId);
       if(orig){
         const origPeruntukan = isStorageWarehouse(orig.toWarehouseId) ? (orig.peruntukan||'mix') : null;
-        await adjustStock(orig.toWarehouseId, orig.itemId, -(orig.qty||0), origPeruntukan);
+        try{
+          await adjustStock(orig.toWarehouseId, orig.itemId, -(orig.qty||0), origPeruntukan);
+        }catch(revErr){
+          throw new Error('Tidak bisa mengubah baris "' + orig.itemName + '": ' + revErr.message + ' (barang ini kemungkinan sudah dipindah/dipakai di tempat lain sejak diterima).');
+        }
       }
       await adjustStock(line.locationId, item.id, line.qty, peruntukan);
       if(line.price>0) await setItemLastPrice(item.id, line.price);
@@ -1514,7 +1595,11 @@ async function actionEditReceivingDoc(docNumber, payload){
   for(const line of existingLines){
     if(!keepIds.has(line.id)){
       const origPeruntukan = isStorageWarehouse(line.toWarehouseId) ? (line.peruntukan||'mix') : null;
-      await adjustStock(line.toWarehouseId, line.itemId, -(line.qty||0), origPeruntukan);
+      try{
+        await adjustStock(line.toWarehouseId, line.itemId, -(line.qty||0), origPeruntukan);
+      }catch(revErr){
+        throw new Error('Tidak bisa menghapus baris "' + line.itemName + '": ' + revErr.message + ' (barang ini kemungkinan sudah dipindah/dipakai di tempat lain sejak diterima).');
+      }
       await db.doc('transactions/'+line.id).delete();
     }
   }
@@ -1725,6 +1810,31 @@ function opnamePeriodOptions(){
   }
   return opts;
 }
+// ---- Format angka Excel (dipakai di laporan-laporan Stock Opname) ----
+// Kode format ini pakai token standar OOXML ("," = pemisah ribuan, "." =
+// desimal) -- Excel/Sheets si pembaca sendiri yang menampilkannya sesuai
+// locale-nya (kalau Excel-nya Indonesia, otomatis jadi titik-ribuan koma-
+// desimal), jadi angkanya tetap angka asli (bisa dijumlah/diurutkan), cuma
+// tampilannya yang rapi -- beda dari menulis teks "236.798.419" langsung.
+const XLFMT_RP = '#,##0';          // Rupiah -- bulat, pemisah ribuan
+const XLFMT_QTY = '#,##0.###';     // Kuantitas -- maks 3 desimal, pemisah ribuan
+const XLFMT_PCT = '0.0"%"';        // Persen -- nilainya sudah dalam skala 0-100
+function xlsxSetCellFormat(ws, r, c, fmt){
+  const addr = XLSX.utils.encode_cell({r, c});
+  if(ws[addr] && ws[addr].t === 'n') ws[addr].z = fmt;
+}
+// Terapkan format ke kolom tertentu di semua baris (dari startRow s/d baris
+// terakhir terisi) -- aman dipakai walau kolom yang sama berisi teks di
+// sebagian baris (judul/label/subtotal), karena hanya sel bertipe angka yang
+// disentuh.
+function xlsxSetColFormats(ws, colFormats, startRow){
+  if(!ws['!ref']) return;
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const from = startRow!=null ? startRow : range.s.r;
+  for(let R = from; R <= range.e.r; R++){
+    Object.keys(colFormats).forEach(ci=>{ xlsxSetCellFormat(ws, R, Number(ci), colFormats[ci]); });
+  }
+}
 async function generateOpnamePdf(periodKey){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
   const session = state.opnameSessions.find(s=>s.periodKey===periodKey);
@@ -1879,7 +1989,11 @@ async function generateOpnameExcel(periodKey){
     const wb = XLSX.utils.book_new();
 
     /* Sheet 1: ringkasan eksekutif + rincian per lokasi (sama isinya dengan
-       halaman pertama laporan PDF). */
+       halaman pertama laporan PDF). Nilai Rupiah dibulatkan ke satuan penuh
+       (sama seperti fmtIDR di tampilan/PDF) supaya tidak muncul desimal sisa
+       pembulatan floating-point (mis. "236798418,5") yang bikin laporan
+       terlihat kurang rapi -- dan setiap sel angka diberi format bawaan
+       Excel (lihat XLFMT_* di atas) supaya tampil dengan pemisah ribuan. */
     const summaryRows = [
       ['ALIRE SAJIAN NUSANTARA'],
       ['Laporan Stock Opname — ' + periodLabel(periodKey)],
@@ -1887,14 +2001,15 @@ async function generateOpnameExcel(periodKey){
       ['Dicetak', fmtDate(new Date().toISOString())],
       [],
       ['Ringkasan Eksekutif'],
-      ['Total Nilai Stok', totalValue],
-      ['Total Nilai Terpakai', totalUsed],
-      ['Net Sales', netSales || ''],
-      ['% Stok terhadap Sales', pct!==null ? Number(pct.toFixed(2)) : ''],
-      [],
-      ['Rincian per Lokasi'],
-      ['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi'],
     ];
+    const rowTotalValue = summaryRows.length; summaryRows.push(['Total Nilai Stok', Math.round(totalValue)]);
+    const rowTotalUsed = summaryRows.length; summaryRows.push(['Total Nilai Terpakai', Math.round(totalUsed)]);
+    const rowNetSales = summaryRows.length; summaryRows.push(['Net Sales', netSales ? Math.round(netSales) : '']);
+    const rowPct = summaryRows.length; summaryRows.push(['% Stok terhadap Sales', pct!==null ? Number(pct.toFixed(1)) : '']);
+    summaryRows.push([]);
+    summaryRows.push(['Rincian per Lokasi']);
+    summaryRows.push(['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi']);
+    const rowLocStart = summaryRows.length;
     const locRows = WAREHOUSES.map(w=>{
       const val = (session.locationValues||{})[w.id];
       if(val===undefined) return null;
@@ -1902,12 +2017,24 @@ async function generateOpnameExcel(periodKey){
       const addedGoods = (session.locationAddedGoodsValues||{})[w.id] || 0;
       const addedWip = (session.locationAddedWipValues||{})[w.id] || 0;
       const kontribusi = totalValue ? (val/totalValue*100) : 0;
-      return [w.name, val, addedGoods, addedWip, used, Number(kontribusi.toFixed(1))];
+      return [w.name, Math.round(val), Math.round(addedGoods), Math.round(addedWip), Math.round(used), Number(kontribusi.toFixed(1))];
     }).filter(Boolean);
     if(locRows.length===0) summaryRows.push(['Belum ada lokasi yang selesai diopname','—','—','—','—','—']);
     else summaryRows.push(...locRows);
     const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
     wsSummary['!cols'] = [{wch:30},{wch:20},{wch:22},{wch:20},{wch:20},{wch:16}];
+    xlsxSetCellFormat(wsSummary, rowTotalValue, 1, XLFMT_RP);
+    xlsxSetCellFormat(wsSummary, rowTotalUsed, 1, XLFMT_RP);
+    xlsxSetCellFormat(wsSummary, rowNetSales, 1, XLFMT_RP);
+    xlsxSetCellFormat(wsSummary, rowPct, 1, XLFMT_PCT);
+    for(let i=0;i<locRows.length;i++){
+      const r = rowLocStart + i;
+      xlsxSetCellFormat(wsSummary, r, 1, XLFMT_RP);
+      xlsxSetCellFormat(wsSummary, r, 2, XLFMT_RP);
+      xlsxSetCellFormat(wsSummary, r, 3, XLFMT_RP);
+      xlsxSetCellFormat(wsSummary, r, 4, XLFMT_RP);
+      xlsxSetCellFormat(wsSummary, r, 5, XLFMT_PCT);
+    }
     XLSX.utils.book_append_sheet(wb, wsSummary, 'Ringkasan');
 
     /* Satu sheet per lokasi yang punya detail per-barang (sama isinya
@@ -1926,11 +2053,12 @@ async function generateOpnameExcel(periodKey){
         'Stok Sistem': it.systemQty,
         'Jumlah Fisik': it.physicalQty,
         'Selisih': it.selisih,
-        'Nilai Fisik': it.nilaiFisik,
+        'Nilai Fisik': Math.round(it.nilaiFisik),
         'Keterangan': it.addedType==='wip' ? 'Tambahan WIP' : (it.addedType==='goods' ? 'Tambahan' : ''),
       }));
       const ws = XLSX.utils.json_to_sheet(rows);
       ws['!cols'] = [{wch:12},{wch:28},{wch:10},{wch:12},{wch:12},{wch:10},{wch:16},{wch:14}];
+      xlsxSetColFormats(ws, {3: XLFMT_QTY, 4: XLFMT_QTY, 5: XLFMT_QTY, 6: XLFMT_RP}, 1);
       let base = w.name.replace(/[\\\/\?\*\[\]:]/g,'').slice(0,31) || w.id;
       let finalName = base, n = 2;
       while(usedSheetNames.has(finalName)){ finalName = (base.slice(0,28) + '_' + n); n++; }
@@ -2021,7 +2149,7 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added){
   try{
     for(const line of changedLines){
       const peruntukan = isStorageWarehouse(locationId) ? 'mix' : null;
-      await adjustStock(locationId, line.item.id, line.delta, peruntukan);
+      await adjustStock(locationId, line.item.id, line.delta, peruntukan, {allowNegative:true});
       await logTx({
         type:'opname', status:'completed',
         itemId: line.item.id, itemName: line.item.name, uom: line.item.uom, qty: Math.abs(line.delta),
@@ -2087,6 +2215,15 @@ async function actionAddItemMaster(payload){
   return true;
 }
 async function actionEditItemMaster(itemId, payload){
+  // Sama seperti actionAddItemMaster: nama dan kode barang harus unik.
+  // Dicek di sini juga (bukan cuma saat tambah baru) supaya tidak ada celah
+  // untuk membuat 2 barang dengan kode yang sama lewat jalur Edit -- excludes
+  // barang itu sendiri (i.id!==itemId) supaya menyimpan tanpa mengubah kode/nama
+  // tetap bisa.
+  const nameDup = state.items.find(i=>i.id!==itemId && i.name.toLowerCase()===payload.name.trim().toLowerCase());
+  if(nameDup) throw new Error('Nama barang sudah dipakai barang lain.');
+  const kodeDup = payload.kode && state.items.find(i=>i.id!==itemId && (i.kode||'').toLowerCase()===payload.kode.trim().toLowerCase());
+  if(kodeDup) throw new Error('Kode barang sudah dipakai barang lain.');
   await db.doc('items/'+itemId).update({ kode: payload.kode || '', name: payload.name.trim(), category: payload.category, uom: payload.uom, lastPrice: payload.price||0, reorderLevel: payload.reorderLevel||0, smallUnit: payload.smallUnit||'', conversionQty: payload.conversionQty||1 });
   toast('Barang diperbarui.');
 }
@@ -2591,11 +2728,10 @@ function renderDashboard(){
                 <div class="ln-track"><div class="ln-fill" style="width:${Math.max(2, x.pct)}%; background:${donutSegmentColor(i)};"></div></div>
                 <div class="ln-pct">${x.pct.toFixed(0)}%</div>
               </div>`).join('')}
-          <div class="locsum-row" style="background:var(--surface-2);">
-            <div class="ln-name" style="font-weight:800; font-size:14px;">Total</div>
-            <div class="ln-value" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(locTotal) : fmtNum(locTotal)}</div>
-            <div class="ln-track"></div>
-            <div class="ln-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
+          <div class="loc-row dash-total-row" style="background:var(--surface-2);">
+            <div class="lr-name" style="font-weight:800; font-size:14px;">Total</div>
+            <div class="lr-val" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(locTotal) : fmtNum(locTotal)}</div>
+            <div class="lr-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
           </div>
         </div>
         <div class="dash-split-col">
@@ -2965,7 +3101,7 @@ function renderInventory(){
                   locLabel = r.locCount>1 ? r.locCount+' lokasi' : '1 lokasi';
                 } else if(showingPeruntukanColumn){
                   const parts = PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(r.w.id, r.item.id, p.id)})).filter(p=>p.qty>0);
-                  locLabel = parts.length ? parts.map(p=>p.name+' '+fmtNum(p.qty)).join(' · ') : '—';
+                  locLabel = parts.length ? parts.map(p=>p.name+' - '+fmtNum(p.qty)).join(' · ') : '—';
                 } else {
                   locLabel = r.w.name;
                 }
@@ -3012,7 +3148,7 @@ function renderStokOpname(){
   document.getElementById('content').innerHTML = `
     ${!canOpname ? `<div class="lock-note" style="margin-bottom:14px;">Hanya Receiving dan Master User yang dapat melakukan Stock Opname.</div>` : ''}
     <div class="panel">
-      <div class="panel-head"><h3>Opname Berjalan</h3><span class="panel-total" style="display:flex; align-items:center; gap:10px;">Total sejauh ini: <b>${fmtIDR(totalValueSoFar)}</b>${session ? `<button class="btn btn-sm btn-outline" onclick="generateOpnamePdf('${periodKey}')">${ICONS.download} Unduh PDF</button><button class="btn btn-sm btn-outline" onclick="generateOpnameExcel('${periodKey}')">${ICONS.download} Unduh Excel</button>` : ''}</span></div>
+      <div class="panel-head"><h3>Opname Berjalan</h3><span class="panel-total" style="display:flex; align-items:center; gap:10px;">Total sejauh ini: <b>${fmtIDR(totalValueSoFar)}</b>${reportDownloadBtns(!!session, `generateOpnamePdf('${periodKey}')`, `generateOpnameExcel('${periodKey}')`)}</span></div>
       ${!allDone ? `<div class="cell-sub" style="padding:8px 16px 0;">Lokasi yang berstatus "Belum" belum ikut dijumlahkan ke total ini — total baru mencakup lokasi yang sudah "Selesai".</div>` : ''}
       <div class="panel-body" style="padding:12px 16px;">
         <div style="display:flex; align-items:flex-end; gap:20px; flex-wrap:wrap;">
@@ -3117,7 +3253,7 @@ function renderStokOpname(){
           <thead><tr><th>Bulan</th><th class="num">Total Nilai Stok</th><th class="num">Net Sales</th><th class="num">% Stok/Sales</th><th></th></tr></thead>
           <tbody>
             ${history.length===0 ? `<tr class="empty-row"><td colspan="5">Belum ada riwayat yang difinalisasi.</td></tr>` :
-              history.slice().reverse().map(s=>`<tr><td class="cell-title">${periodLabel(s.periodKey)}</td><td class="num">${fmtIDR(s.totalValue||0)}</td><td class="num">${fmtIDR(s.netSales||0)}</td><td class="num">${s.netSales?(s.totalValue/s.netSales*100).toFixed(2).replace('.',','):'—'}%</td><td><button class="btn btn-sm btn-outline" onclick="generateOpnamePdf('${s.periodKey}')">${ICONS.download} PDF</button></td></tr>`).join('')}
+              history.slice().reverse().map(s=>`<tr><td class="cell-title">${periodLabel(s.periodKey)}</td><td class="num">${fmtIDR(s.totalValue||0)}</td><td class="num">${fmtIDR(s.netSales||0)}</td><td class="num">${s.netSales?(s.totalValue/s.netSales*100).toFixed(2).replace('.',','):'—'}%</td><td><button class="btn btn-sm btn-outline" onclick="generateOpnamePdf('${s.periodKey}')">${ICONS.download} Unduh PDF</button></td></tr>`).join('')}
           </tbody>
         </table>
       </div>
@@ -3302,7 +3438,7 @@ function opnameSystemDisplay(locationId, item){
   return srHasSmallUnit(item) ? system * item.conversionQty : system;
 }
 function opnameUpdateCount(itemId, value){
-  opnameCounts[itemId] = parseFloat(value) || 0;
+  opnameCounts[itemId] = parseQtyInput(value);
   opnameTouched[itemId] = true;
   const locationId = state.opnameCountLocation;
   const item = itemById(itemId);
@@ -3418,13 +3554,13 @@ function renderOpnameCounting(){
                 const isAdded = opnameAdded.hasOwnProperty(item.id);
                 const touched = opnameTouched[item.id] || isAdded;
                 const peruntukanParts = (isStorage && !isAdded) ? PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(locationId, item.id, p.id)})).filter(p=>p.qty>0) : [];
-                const peruntukanLabel = peruntukanParts.length ? peruntukanParts.map(p=>escapeHtml(p.name)+' '+fmtNum(opnameDisplayQty(item,p.qty))).join(' · ') : '—';
+                const peruntukanLabel = peruntukanParts.length ? peruntukanParts.map(p=>escapeHtml(p.name)+' - '+fmtNum(opnameDisplayQty(item,p.qty))).join(' · ') : '—';
                 return `<tr>
                   <td class="cell-title">${escapeHtml(item.name)}${isWip?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">WIP</span>':''}${(!isWip && isAdded)?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">Tambahan</span>':''}</td>
                   ${isStorage?`<td>${peruntukanLabel}</td>`:''}
                   <td>${escapeHtml(countUnit||'')}${useSmall ? `<div class="cell-sub">1 ${escapeHtml(item.uom)} = ${fmtNum(item.conversionQty)} ${escapeHtml(item.smallUnit)}</div>` : ''}</td>
                   <td class="num">${fmtNum(systemDisplay)}</td>
-                  <td class="num"><input type="number" style="width:96px; text-align:right;" value="${touched ? counted : ''}" placeholder="0" oninput="opnameUpdateCount('${item.id}', this.value)"></td>
+                  <td class="num"><input type="text" inputmode="decimal" style="width:96px; text-align:right;" value="${touched ? fmtQtyInputValue(counted) : ''}" placeholder="0" oninput="formatQtyInput(this); opnameUpdateCount('${item.id}', this.value)"></td>
                   <td class="num" id="opnameDiff-${item.id}" style="color:${diffColor}; font-weight:700;">${diff===0?'—':(diff>0?'+':'')+fmtNum(diff)}</td>
                 </tr>`;
               }).join('')}
@@ -3488,7 +3624,7 @@ async function loadOpnameCorrectDetail(locationId, periodKey){
 }
 function setOpnameCorrectSearch(v){ state.opnameCorrectSearch = v; render(); }
 function opnameCorrectUpdateQty(itemId, value){
-  opnameCorrectQty[itemId] = parseFloat(value) || 0;
+  opnameCorrectQty[itemId] = parseQtyInput(value);
   const detail = opnameCorrectDetail;
   const row = detail && detail.items.find(it=>it.itemId===itemId);
   const item = itemById(itemId);
@@ -3551,7 +3687,7 @@ function renderOpnameCorrect(){
                   <td class="cell-title">${escapeHtml(it.itemName)}</td>
                   <td>${escapeHtml(unit||'')}${useSmall ? `<div class="cell-sub">1 ${escapeHtml(item.uom)} = ${fmtNum(item.conversionQty)} ${escapeHtml(item.smallUnit)}</div>` : ''}</td>
                   <td class="num">${fmtNum(recorded)}</td>
-                  <td class="num"><input type="number" style="width:96px; text-align:right;" value="${current}" oninput="opnameCorrectUpdateQty('${it.itemId}', this.value)"></td>
+                  <td class="num"><input type="text" inputmode="decimal" style="width:96px; text-align:right;" value="${fmtQtyInputValue(current)}" oninput="formatQtyInput(this); opnameCorrectUpdateQty('${it.itemId}', this.value)"></td>
                   <td class="num" id="opnameCorrectDiff-${it.itemId}" style="color:${diffColor}; font-weight:700;">${diff===0?'—':(diff>0?'+':'')+fmtNum(diff)}</td>
                 </tr>`;
               }).join('')}
@@ -3601,7 +3737,7 @@ async function saveOpnameCorrection(){
       const delta = Math.round((newCanonical - (it.physicalQty||0)) * 1000) / 1000;
       if(Math.abs(delta) < 0.0001) continue;
       const peruntukan = isStorage ? 'mix' : null;
-      await adjustStock(locationId, it.itemId, delta, peruntukan);
+      await adjustStock(locationId, it.itemId, delta, peruntukan, {allowNegative:true});
       await logTx({
         type:'opname', status:'completed',
         itemId: it.itemId, itemName: it.itemName, uom: item.uom, qty: Math.abs(delta),
@@ -3756,7 +3892,12 @@ function exportOpnameTemplateAll(){
         'Kategori': item.category || '',
         'Satuan Hitung': unit || '',
         'Stok Sistem': Math.round(displayQty*1000)/1000,
-        'Jumlah Fisik': Math.round(displayQty*1000)/1000,
+        // Sengaja dikosongkan (bukan diisi Stok Sistem) supaya yang menghitung
+        // fisik benar-benar mengisi angka hasil hitungannya sendiri, bukan
+        // sekadar melihat angka sistem yang sudah ada -- dan baris yang tidak
+        // diisi otomatis dilewati saat import (lihat handleOpnameImportAllFile),
+        // bukan dianggap fisik = 0.
+        'Jumlah Fisik': '',
       });
     });
     // WIP items never arrive via Penerimaan Barang, so they'd have zero stock and never
@@ -3773,7 +3914,7 @@ function exportOpnameTemplateAll(){
           'Kategori': item.category,
           'Satuan Hitung': unit || '',
           'Stok Sistem': 0,
-          'Jumlah Fisik': 0,
+          'Jumlah Fisik': '',
         });
       });
     }
@@ -4721,7 +4862,7 @@ function renderDrawer(){
           let breakdown = '';
           if(isStorageWarehouse(x.w.id)){
             const parts = PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(x.w.id, item.id, p.id)})).filter(p=>p.qty>0);
-            if(parts.length>0) breakdown = `<div class="cell-sub" style="margin-top:1px;">${parts.map(p=>p.name+' '+fmtNum(p.qty)).join(' · ')}</div>`;
+            if(parts.length>0) breakdown = `<div class="cell-sub" style="margin-top:1px;">${parts.map(p=>p.name+' - '+fmtNum(p.qty)).join(' · ')}</div>`;
           }
           return `<div class="loc-row-rich">
             <div class="lrr-top"><div class="lrr-name">${x.w.name}</div><div class="lrr-qty">${fmtNum(x.qty)} ${escapeHtml(item.uom||'')}</div></div>
@@ -5633,7 +5774,7 @@ function reportOpnameR1Html(){
         <h3>Stock Opname${asOfLabel ? ' — ' + escapeHtml(asOfLabel) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           Total: <b>${fmtIDR(grandTotal)}</b>
-          ${(ready && groups && groups.length) ? `<button class="btn btn-sm btn-outline" onclick="exportReport1Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport1Pdf()">${ICONS.download} PDF</button>` : ''}
+          ${reportDownloadBtns(ready && groups && groups.length, 'exportReport1Pdf()', 'exportReport1Excel()')}
         </span>
       </div>
       ${finalizedSessions.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
@@ -5706,22 +5847,26 @@ async function exportReport1Excel(){
     ['No','Item','Jenis Bahan Baku','Penyimpanan','Stock Akhir','Satuan','Harga Satuan','Jumlah'],
   ];
   const merges = [ {s:{r:0,c:0}, e:{r:0,c:7}}, {s:{r:1,c:0}, e:{r:1,c:7}} ];
+  const headerRowIdx = aoa.length - 1;
   let grand = 0;
   groups.forEach(g=>{
     merges.push({ s:{r:aoa.length,c:0}, e:{r:aoa.length,c:7} });
     aoa.push([divisionLabel(g.id),'','','','','','','']);
     g.rows.forEach(r=>{
       const disp = opnameSmallDisplay(itemById(r.itemId), r.qty);
-      aoa.push([r.no, r.name, r.category||'', r.penyimpanan, disp.qty, disp.unit||'', Math.round(disp.unitPrice), r.jumlah]);
+      aoa.push([r.no, r.name, r.category||'', r.penyimpanan, disp.qty, disp.unit||'', Math.round(disp.unitPrice), Math.round(r.jumlah)]);
     });
-    aoa.push(['','','','','','','Subtotal '+divisionLabel(g.id), g.subtotal]);
+    aoa.push(['','','','','','','Subtotal '+divisionLabel(g.id), Math.round(g.subtotal)]);
     grand += g.subtotal;
   });
-  aoa.push(['','','','','','','GRAND TOTAL', grand]);
+  aoa.push(['','','','','','','GRAND TOTAL', Math.round(grand)]);
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
   ws['!cols'] = [{wch:5},{wch:30},{wch:18},{wch:18},{wch:12},{wch:9},{wch:14},{wch:16}];
+  // Format angka: kolom Stock Akhir (kuantitas) dan Harga Satuan/Jumlah
+  // (Rupiah) -- kolom No sengaja dibiarkan format bawaan karena cuma nomor urut.
+  xlsxSetColFormats(ws, {4: XLFMT_QTY, 6: XLFMT_RP, 7: XLFMT_RP}, headerRowIdx+1);
   XLSX.utils.book_append_sheet(wb, ws, 'Stock Opname');
   XLSX.writeFile(wb, 'Laporan_Stock_Opname_' + (asOf==='live'?currentPeriodKey():asOf) + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
@@ -5815,7 +5960,7 @@ function reportOpnameR2Html(){
         <h3>Nilai Penggunaan per Divisi${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           Total Usage: <b>${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
-          ${purchaseReady ? `<button class="btn btn-sm btn-outline" onclick="exportReport2Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport2Pdf()">${ICONS.download} PDF</button>` : ''}
+          ${reportDownloadBtns(purchaseReady, 'exportReport2Pdf()', 'exportReport2Excel()')}
         </span>
       </div>
       ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
@@ -5930,7 +6075,7 @@ function reportOpnameR3Html(){
       <div class="panel-head">
         <h3>Food &amp; Beverage Cost${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px;">
-          ${purchaseReady ? `<button class="btn btn-sm btn-outline" onclick="exportReport3Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport3Pdf()">${ICONS.download} PDF</button>` : ''}
+          ${reportDownloadBtns(purchaseReady, 'exportReport3Pdf()', 'exportReport3Excel()')}
         </span>
       </div>
       ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi. Selesaikan dan kunci Stock Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stock Opname dulu, baru datanya muncul di laporan ini.</div>` : `
@@ -6023,7 +6168,7 @@ function reportOpnameR4Html(){
     <div class="panel">
       <div class="panel-head">
         <h3>KPI Ideal Stock <span class="cell-sub">(target 10–15% dari Net Sales per bulan)</span></h3>
-        <span class="panel-total">${data.length ? `<button class="btn btn-sm btn-outline" onclick="exportReport4Excel()">${ICONS.download} Excel</button><button class="btn btn-sm btn-outline" onclick="exportReport4Pdf()">${ICONS.download} PDF</button>` : ''}</span>
+        <span class="panel-total">${reportDownloadBtns(data.length, 'exportReport4Pdf()', 'exportReport4Excel()')}</span>
       </div>
       ${data.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stock Opname yang difinalisasi.</div>` : `
       <div class="table-scroll">
@@ -6152,7 +6297,7 @@ function renderReportMasuk(){
 
   document.getElementById('content').innerHTML = `
     <div class="panel">
-      <div class="panel-head"><h3>Laporan Barang Masuk</h3><span class="panel-total">Total: <b>${fmtIDR(totalNilai)}</b></span></div>
+      <div class="panel-head"><h3>Laporan Barang Masuk</h3><span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">Total: <b>${fmtIDR(totalNilai)}</b>${reportDownloadBtns(docs.length, 'exportReportMasukPdf()', 'exportReportMasukExcel()')}</span></div>
       <div class="filter-row">
         <select onchange="setReportMasukLocation(this.value)"><option value="">Semua Lokasi</option>${WAREHOUSES.map(w=>`<option value="${w.id}" ${state.reportMasukLocation===w.id?'selected':''}>${w.name}</option>`).join('')}</select>
         <select onchange="setReportMasukSupplier(this.value)"><option value="">Semua Supplier</option>${(state.suppliers||[]).map(s=>`<option value="${s.id}" ${state.reportMasukSupplier===s.id?'selected':''}>${escapeHtml(s.name)}</option>`).join('')}</select>
@@ -6177,6 +6322,76 @@ function renderReportMasuk(){
       ${paginationHtml(state.reportMasukPage, totalPages, docs.length, pageSize, 'setReportMasukPage', 'dokumen')}
     </div>
   `;
+}
+function reportMasukFilteredDocs(){
+  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
+  if(state.reportMasukLocation) docs = docs.filter(d=>d.lines.some(l=>l.toWarehouseId===state.reportMasukLocation));
+  if(state.reportMasukSupplier) docs = docs.filter(d=>d.lines[0].supplierId===state.reportMasukSupplier);
+  if(state.reportMasukCategory) docs = docs.filter(d=>d.lines.some(l=>{ const it=itemById(l.itemId); return it && it.category===state.reportMasukCategory; }));
+  if(state.reportMasukSearch){
+    const q = state.reportMasukSearch.toLowerCase();
+    docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].supplierName||'').toLowerCase().includes(q));
+  }
+  return docs.filter(d => inDateRange(d.createdAt, state.reportMasukDateFrom, state.reportMasukDateTo));
+}
+async function exportReportMasukExcel(){
+  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const docs = reportMasukFilteredDocs();
+  if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const aoa = [
+    ['ALIRE SAJIAN NUSANTARA'],
+    ['Laporan Barang Masuk'],
+    ['Dicetak', fmtDate(new Date().toISOString())],
+    [],
+    ['Tanggal','No. Penerimaan','Supplier','Lokasi','Total Nilai'],
+  ];
+  let grand = 0;
+  docs.forEach(d=>{
+    const first = d.lines[0];
+    const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
+    grand += total;
+    aoa.push([fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), total]);
+  });
+  aoa.push(['','','','Grand Total', grand]);
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
+  ws['!cols'] = [{wch:18},{wch:16},{wch:26},{wch:20},{wch:16}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Barang Masuk');
+  XLSX.writeFile(wb, 'Laporan_Barang_Masuk.xlsx');
+  toast('Laporan Excel berhasil dibuat.');
+}
+async function exportReportMasukPdf(){
+  if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
+  const docs = reportMasukFilteredDocs();
+  if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const margin = 40; let y = 50;
+  doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
+  doc.setFontSize(13); doc.text('Laporan Barang Masuk', margin, y); y+=16;
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
+  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=18;
+  doc.setTextColor(0);
+  let grand = 0;
+  const body = docs.map(d=>{
+    const first = d.lines[0];
+    const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
+    grand += total;
+    return [fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), fmtIDR(total)];
+  });
+  body.push(['','','','Grand Total', fmtIDR(grand)]);
+  doc.autoTable({
+    startY: y, margin:{left:margin, right:margin},
+    head: [['Tanggal','No. Penerimaan','Supplier','Lokasi','Total Nilai']],
+    body,
+    styles:{fontSize:9, cellPadding:5},
+    headStyles:{fillColor:[107,63,34], textColor:255},
+    columnStyles:{4:{halign:'right'}},
+    didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
+  });
+  doc.save('Laporan_Barang_Masuk.pdf');
+  toast('Laporan PDF berhasil dibuat.');
 }
 
 /* =========================================================
@@ -6207,7 +6422,7 @@ function renderReportKeluar(){
 
   document.getElementById('content').innerHTML = `
     <div class="panel">
-      <div class="panel-head"><h3>Laporan Barang Bergerak</h3><span class="panel-total">Total: <b>${fmtIDR(totalNilai)}</b></span></div>
+      <div class="panel-head"><h3>Laporan Barang Bergerak</h3><span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">Total: <b>${fmtIDR(totalNilai)}</b>${reportDownloadBtns(lines.length, 'exportReportKeluarPdf()', 'exportReportKeluarExcel()')}</span></div>
       <div class="filter-row">
         <select onchange="setReportKeluarLocation(this.value)"><option value="">Semua Lokasi</option>${WAREHOUSES.map(w=>`<option value="${w.id}" ${state.reportKeluarLocation===w.id?'selected':''}>${w.name}</option>`).join('')}</select>
       </div>
@@ -6226,6 +6441,73 @@ function renderReportKeluar(){
       ${paginationHtml(state.reportKeluarPage, totalPages, lines.length, pageSize, 'setReportKeluarPage', 'baris')}
     </div>
   `;
+}
+function reportKeluarFilteredLines(){
+  let lines = state.transactions.filter(t=>t.type==='transfer');
+  if(state.reportKeluarLocation) lines = lines.filter(l=>l.fromWarehouseId===state.reportKeluarLocation || l.toWarehouseId===state.reportKeluarLocation);
+  if(state.reportKeluarSearch){
+    const q = state.reportKeluarSearch.toLowerCase();
+    lines = lines.filter(l => (l.docNumber||'').toLowerCase().includes(q) || (l.requestDocNumber||'').toLowerCase().includes(q) || (l.itemName||'').toLowerCase().includes(q));
+  }
+  lines = lines.filter(l => inDateRange(l.createdAt, state.reportKeluarDateFrom, state.reportKeluarDateTo));
+  return lines.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+}
+async function exportReportKeluarExcel(){
+  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const lines = reportKeluarFilteredLines();
+  if(!lines.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const aoa = [
+    ['ALIRE SAJIAN NUSANTARA'],
+    ['Laporan Barang Bergerak'],
+    ['Dicetak', fmtDate(new Date().toISOString())],
+    [],
+    ['Tanggal','No. Transfer','No. SR','Dari','Ke','Barang','Jumlah','Satuan','Nilai'],
+  ];
+  let grand = 0;
+  lines.forEach(l=>{
+    grand += (l.totalValue||0);
+    const item = itemById(l.itemId);
+    aoa.push([fmtDate(l.createdAt), l.docNumber||'—', l.requestDocNumber||'—', l.fromWarehouseName||'', l.toWarehouseName||'', l.itemName||'', l.qty||0, l.uom||(item&&item.uom)||'', l.totalValue||0]);
+  });
+  aoa.push(['','','','','','','','Grand Total', grand]);
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:8}}, {s:{r:1,c:0}, e:{r:1,c:8}} ];
+  ws['!cols'] = [{wch:18},{wch:14},{wch:14},{wch:16},{wch:16},{wch:26},{wch:10},{wch:10},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Barang Bergerak');
+  XLSX.writeFile(wb, 'Laporan_Barang_Bergerak.xlsx');
+  toast('Laporan Excel berhasil dibuat.');
+}
+async function exportReportKeluarPdf(){
+  if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
+  const lines = reportKeluarFilteredLines();
+  if(!lines.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4', orientation:'landscape' });
+  const margin = 40; let y = 50;
+  doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
+  doc.setFontSize(13); doc.text('Laporan Barang Bergerak', margin, y); y+=16;
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
+  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=18;
+  doc.setTextColor(0);
+  let grand = 0;
+  const body = lines.map(l=>{
+    grand += (l.totalValue||0);
+    const item = itemById(l.itemId);
+    return [fmtDate(l.createdAt), l.docNumber||'—', l.requestDocNumber||'—', l.fromWarehouseName||'', l.toWarehouseName||'', l.itemName||'', qtyWithSmallNote(l.qty, item, l.uom).replace(/<[^>]*>/g,''), fmtIDR(l.totalValue||0)];
+  });
+  body.push(['','','','','','','Grand Total', fmtIDR(grand)]);
+  doc.autoTable({
+    startY: y, margin:{left:margin, right:margin},
+    head: [['Tanggal','No. Transfer','No. SR','Dari','Ke','Barang','Jumlah','Nilai']],
+    body,
+    styles:{fontSize:8.5, cellPadding:4},
+    headStyles:{fillColor:[107,63,34], textColor:255},
+    columnStyles:{6:{halign:'right'},7:{halign:'right'}},
+    didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
+  });
+  doc.save('Laporan_Barang_Bergerak.pdf');
+  toast('Laporan PDF berhasil dibuat.');
 }
 
 /* =========================================================
@@ -6274,7 +6556,7 @@ function renderReportWip(){
   document.getElementById('content').innerHTML = `
     <div class="lock-note">Rekap ini hanya menghitung Permintaan WIP yang sudah <b>tercatat</b> (disetujui Kitchen Leader &amp; Receiving). Murni untuk melacak frekuensi — tidak berkaitan dengan stok/inventory atau Stock Opname.</div>
     <div class="panel">
-      <div class="panel-head"><h3>Laporan Pencatatan WIP</h3><span class="panel-total">Total Tercatat: <b>${docs.length}</b></span></div>
+      <div class="panel-head"><h3>Laporan Pencatatan WIP</h3><span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">Total Tercatat: <b>${docs.length}</b>${reportDownloadBtns(docs.length, 'exportReportWipPdf()', 'exportReportWipExcel()')}</span></div>
       <div class="filter-row">
         ${searchDateFilterHtml({placeholder:'Cari No. Permintaan, barang, atau divisi…', search:state.reportWipSearch, dateFrom:state.reportWipDateFrom, dateTo:state.reportWipDateTo, onSearch:'setReportWipSearch', onDateFrom:'setReportWipDateFrom', onDateTo:'setReportWipDateTo', onReset:'resetReportWipFilters'})}
       </div>
@@ -6326,6 +6608,88 @@ function renderReportWip(){
       ${paginationHtml(state.reportWipPage, totalPages, docs.length, pageSize, 'setReportWipPage', 'permintaan')}
     </div>
   `;
+}
+function reportWipFilteredData(){
+  const role = currentRole();
+  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  if(state.reportWipSearch){
+    const q = state.reportWipSearch.toLowerCase();
+    docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q));
+  }
+  docs = docs.filter(d => inDateRange(d.createdAt, state.reportWipDateFrom, state.reportWipDateTo));
+  const itemStats = {}, divisiStats = {};
+  docs.forEach(d=>{
+    const first = d.lines[0];
+    const dv = divisiStats[first.divisionId] || (divisiStats[first.divisionId] = {name:first.divisionName||'—', count:0});
+    dv.count += 1;
+    d.lines.forEach(l=>{
+      const it = itemStats[l.itemId] || (itemStats[l.itemId] = {name:l.itemName, uom:l.uom, count:0, qty:0});
+      it.count += 1;
+      it.qty += (l.qty||0);
+    });
+  });
+  const itemRows = Object.values(itemStats).sort((a,b)=>b.count-a.count);
+  const divisiRows = Object.values(divisiStats).sort((a,b)=>b.count-a.count);
+  return { docs, itemRows, divisiRows };
+}
+async function exportReportWipExcel(){
+  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const { docs, itemRows, divisiRows } = reportWipFilteredData();
+  if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const aoa = [
+    ['ALIRE SAJIAN NUSANTARA'],
+    ['Laporan Pencatatan WIP'],
+    ['Dicetak', fmtDate(new Date().toISOString())],
+    [],
+    ['Barang WIP Paling Sering Diminta'],
+    ['Barang','Frekuensi','Total Jumlah','Satuan'],
+    ...itemRows.map(r=>[r.name, r.count, r.qty, r.uom||'']),
+    [],
+    ['Divisi Paling Sering Terlibat'],
+    ['Divisi','Frekuensi'],
+    ...divisiRows.map(r=>[r.name, r.count]),
+    [],
+    ['Riwayat Permintaan WIP Tercatat'],
+    ['No. Permintaan','Tanggal','Divisi','Barang','Jumlah Baris'],
+    ...docs.map(d=>{
+      const first = d.lines[0];
+      return [d.docNumber, fmtDate(d.createdAt), first.divisionName||'—', d.lines.map(l=>l.itemName).join(', '), d.lines.length];
+    }),
+  ];
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
+  ws['!cols'] = [{wch:30},{wch:14},{wch:14},{wch:30},{wch:14}];
+  XLSX.utils.book_append_sheet(wb, ws, 'Pencatatan WIP');
+  XLSX.writeFile(wb, 'Laporan_Pencatatan_WIP.xlsx');
+  toast('Laporan Excel berhasil dibuat.');
+}
+async function exportReportWipPdf(){
+  if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
+  const { docs } = reportWipFilteredData();
+  if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const margin = 40; let y = 50;
+  doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
+  doc.setFontSize(13); doc.text('Laporan Pencatatan WIP', margin, y); y+=16;
+  doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
+  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=18;
+  doc.setTextColor(0);
+  const body = docs.map(d=>{
+    const first = d.lines[0];
+    return [d.docNumber, fmtDate(d.createdAt), first.divisionName||'—', d.lines.map(l=>l.itemName).join(', '), String(d.lines.length)];
+  });
+  doc.autoTable({
+    startY: y, margin:{left:margin, right:margin},
+    head: [['No. Permintaan','Tanggal','Divisi','Barang','Jumlah Baris']],
+    body,
+    styles:{fontSize:8.5, cellPadding:4},
+    headStyles:{fillColor:[107,63,34], textColor:255},
+    columnStyles:{4:{halign:'right'}},
+  });
+  doc.save('Laporan_Pencatatan_WIP.pdf');
+  toast('Laporan PDF berhasil dibuat.');
 }
 
 /* =========================================================
@@ -6954,7 +7318,13 @@ function srRenderCombo(idx, query){
   // Permintaan Barang moves real stock out of Gudang Utama -- WIP items
   // have none, so they're excluded here entirely (both WIP Kitchen and WIP
   // Bar). WIP hand-over/requests are tracked separately via Permintaan WIP.
-  const pool = nonWipItemsPool();
+  // Also exclude items already picked in another row of this same request --
+  // two rows for the same item let the approval step's stock-sufficiency
+  // check run against a stale snapshot for the second row (it doesn't see
+  // the first row's deduction yet), which could approve a transfer for more
+  // than the source location actually has.
+  const takenIds = new Set(srLines.filter((l,i)=>i!==idx && l.itemId).map(l=>l.itemId));
+  const pool = nonWipItemsPool().filter(i=>!takenIds.has(i.id));
   const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
   if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
   box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="srPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
@@ -6963,6 +7333,11 @@ function srRenderCombo(idx, query){
 function srPickCombo(idx, itemId){
   const item = itemById(itemId);
   if(!item) return;
+  if(srLines.some((l,i)=>i!==idx && l.itemId===itemId)){
+    toast('Barang ini sudah ada di baris lain.', true);
+    srCloseCombo(idx);
+    return;
+  }
   srLines[idx].itemId = itemId;
   srLines[idx].unit = 'uom';
   srCloseCombo(idx);
@@ -7422,7 +7797,7 @@ function openImportModal(){
   const body = `
     <div id="impError"></div>
     <div class="lock-note">Kolom wajib: Nama Barang, Kode Barang, Kategori, Satuan, Harga, Reorder Level. <a href="#" onclick="downloadTemplate(); return false;" style="color:var(--brand); font-weight:700;">Unduh template</a></div>
-    <div class="field"><label>File Excel/CSV</label><input type="file" id="impFile" accept=".xlsx,.xls,.csv" onchange="handleImportFile(event)"></div>
+    <div class="field"><label>File Excel</label><input type="file" id="impFile" accept=".xlsx,.xls" onchange="handleImportFile(event)"></div>
     <div id="impPreview"></div>
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="impConfirmBtn" onclick="confirmImport()" disabled>Import</button>`;
@@ -7453,7 +7828,10 @@ function handleImportFile(e){
         const priceRaw = importNormField(row, ['harga','price','unit price']);
         const reorderRaw = importNormField(row, ['reorder level','reorder']);
         const category = ITEM_CATEGORIES.find(c=>c.toLowerCase()===catRaw.toLowerCase()) || catRaw || ITEM_CATEGORIES[0];
-        return { name, kode, category, uom, price: parseFloat(priceRaw)||0, reorderLevel: parseFloat(reorderRaw)||0, valid: !!name };
+        // Harga uses parsePriceInput (not raw parseFloat) so a cell stored as
+        // Indonesian-formatted text (e.g. "42.000") still reads as 42000
+        // instead of silently truncating at the dot to 42.
+        return { name, kode, category, uom, price: parsePriceInput(priceRaw)||0, reorderLevel: parseFloat(reorderRaw)||0, valid: !!name };
       });
       const validCount = importRows.filter(r=>r.valid).length;
       preview.innerHTML = `<div class="lock-note">${validCount} dari ${importRows.length} baris siap diimpor.</div>
@@ -7463,7 +7841,7 @@ function handleImportFile(e){
         </div>`;
       confirmBtn.disabled = validCount===0;
       confirmBtn.textContent = 'Import ' + validCount + ' Barang';
-    }catch(ex){ err.innerHTML = errBox('Gagal membaca file. Pastikan formatnya .xlsx, .xls, atau .csv.'); }
+    }catch(ex){ err.innerHTML = errBox('Gagal membaca file. Pastikan formatnya .xlsx atau .xls.'); }
   };
   reader.readAsArrayBuffer(file);
 }
@@ -7572,7 +7950,7 @@ function logout(){ localStorage.removeItem('inv_auth_user'); authedUsername = nu
 ========================================================= */
 const VIEW_PERM = {
   dashboard: canViewDashboard, inventory: canViewInventory, stockopname: canManageGudang,
-  receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData, wipitems: canViewMasterData,
+  receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData, wipitems: canViewWipItems,
   'report-masuk': canViewOpsReports, 'report-keluar': canViewOpsReports, lowstock: canViewOpsReports, 'report-divisi': canViewReports,
   'report-opname': canViewReports, wiprequests: canSeeWipNav, 'report-wip': canSeeWipNav,
   'opname-correct': role => role.kind==='master',
@@ -7622,6 +8000,7 @@ function render(){
   if(savedAccount){ authedUsername = savedAccount.username; state.role = savedAccount.roleId; showApp(); }
   else { showLogin(); }
 })();
+
 </script>
 </body>
 </html>
