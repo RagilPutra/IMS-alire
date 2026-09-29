@@ -579,6 +579,16 @@
   </div>
 </div>
 
+<!-- xlsx-js-style: a drop-in fork of SheetJS that adds cell.s (font/fill/
+     border/alignment) support, used only for building the styled Excel
+     reports below (window.XLSXStyle). It's loaded and captured BEFORE the
+     stock SheetJS community build, which is then loaded second so it
+     re-claims window.XLSX unchanged -- every existing read path (file
+     import) keeps using the exact same tested library as before; only the
+     write/export functions that were updated to use XLSXStyle explicitly
+     pick up styling, so nothing about reading files changed. -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.min.js"></script>
+<script>window.XLSXStyle = window.XLSX;</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.25/jspdf.plugin.autotable.min.js"></script>
@@ -1835,6 +1845,81 @@ function xlsxSetColFormats(ws, colFormats, startRow){
     Object.keys(colFormats).forEach(ci=>{ xlsxSetCellFormat(ws, R, Number(ci), colFormats[ci]); });
   }
 }
+// ---- Styling laporan Excel (border, warna header/sub-header/body) ----
+// Pakai window.XLSXStyle (lihat komentar di <script> tag xlsx-js-style di
+// <head>) -- SheetJS gratis (window.XLSX, dipakai untuk baca file import)
+// tidak bisa menulis cell.s (font/fill/border) sama sekali, jadi setiap
+// fungsi unduh Excel yang mau tampil rapi harus dibangun lewat XLSXStyle
+// (book_new/aoa_to_sheet/json_to_sheet/book_append_sheet/writeFile), bukan
+// XLSX biasa -- kalau tertukar, hasilnya tetap ke-generate tapi semua
+// styling di bawah ini diam-diam hilang (writer lama mengabaikan cell.s).
+// Warna-warnanya sengaja disamakan dengan palet CSS aplikasi (--brand,
+// --gold-tint, --surface-2, dst.) supaya laporannya senada dengan tampilan
+// aplikasi, bukan warna default Excel.
+const XLC_BRAND_DARK = '4E2E19';
+const XLC_GOLD_TINT = 'F5EEE0';
+const XLC_SURFACE2 = 'F1EEE8';
+const XLC_BORDER = 'D3CABB';
+const XLC_TEXT = '171512';
+const XLC_TEXT_FAINT = '756F67';
+const XLC_WHITE = 'FFFFFF';
+function xlThinBorder(color){
+  const b = { style:'thin', color:{rgb: color || XLC_BORDER} };
+  return { top:b, bottom:b, left:b, right:b };
+}
+function xlCell(ws, r, c){
+  const addr = XLSXStyle.utils.encode_cell({r, c});
+  if(!ws[addr]) ws[addr] = { t:'z', v:'' };
+  return ws[addr];
+}
+// Terapkan satu style ke seluruh lebar sebuah baris (kolom 0..colCount-1) --
+// dipakai untuk baris sub-header/label-grup dan baris subtotal/grand total,
+// yang selalu satu gaya rata dari ujung ke ujung.
+function xlStyleRow(ws, r, colCount, style){
+  for(let c=0; c<colCount; c++) xlCell(ws, r, c).s = style;
+}
+function xlHeaderStyle(){
+  return {
+    font:{bold:true, color:{rgb:XLC_WHITE}, sz:11},
+    fill:{patternType:'solid', fgColor:{rgb:XLC_BRAND_DARK}},
+    alignment:{horizontal:'center', vertical:'center', wrapText:true},
+    border:xlThinBorder(XLC_BRAND_DARK),
+  };
+}
+function xlTitleStyle(size){
+  return { font:{bold:true, color:{rgb:XLC_BRAND_DARK}, sz:size||14} };
+}
+function xlMetaStyle(){
+  return { font:{italic:true, color:{rgb:XLC_TEXT_FAINT}, sz:10} };
+}
+function xlSubheaderStyle(){
+  return {
+    font:{bold:true, color:{rgb:XLC_BRAND_DARK}, sz:11},
+    fill:{patternType:'solid', fgColor:{rgb:XLC_GOLD_TINT}},
+    border:xlThinBorder(),
+  };
+}
+function xlTotalStyle(){
+  return {
+    font:{bold:true, color:{rgb:XLC_BRAND_DARK}},
+    fill:{patternType:'solid', fgColor:{rgb:XLC_GOLD_TINT}},
+    border:{ top:{style:'medium', color:{rgb:XLC_BRAND_DARK}}, bottom:xlThinBorder().bottom, left:xlThinBorder().left, right:xlThinBorder().right },
+  };
+}
+// Body: border tipis di semua sel + warna selang-seling (zebra) supaya
+// barisnya gampang diikuti mata; kolom yang disebut di `numericCols` (index
+// 0-based) rata kanan, sisanya rata kiri.
+function xlStyleBody(ws, rowFrom, rowTo, colCount, numericCols){
+  numericCols = numericCols || [];
+  for(let r=rowFrom; r<rowTo; r++){
+    const zebra = (r - rowFrom) % 2 === 1;
+    for(let c=0; c<colCount; c++){
+      const style = { border:xlThinBorder(), alignment:{ horizontal: numericCols.includes(c) ? 'right' : 'left', vertical:'center' } };
+      if(zebra) style.fill = {patternType:'solid', fgColor:{rgb:XLC_SURFACE2}};
+      xlCell(ws, r, c).s = style;
+    }
+  }
+}
 async function generateOpnamePdf(periodKey){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
   const session = state.opnameSessions.find(s=>s.periodKey===periodKey);
@@ -1968,7 +2053,7 @@ async function generateOpnamePdf(periodKey){
   }
 }
 async function generateOpnameExcel(periodKey){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const session = state.opnameSessions.find(s=>s.periodKey===periodKey);
   if(!session){ toast('Data opname periode ini tidak ditemukan.', true); return; }
   showLoading('Menyiapkan laporan Excel…');
@@ -1986,7 +2071,7 @@ async function generateOpnameExcel(periodKey){
     const netSales = session.netSales || 0;
     const pct = netSales ? (totalValue/netSales*100) : null;
 
-    const wb = XLSX.utils.book_new();
+    const wb = XLSXStyle.utils.book_new();
 
     /* Sheet 1: ringkasan eksekutif + rincian per lokasi (sama isinya dengan
        halaman pertama laporan PDF). Nilai Rupiah dibulatkan ke satuan penuh
@@ -1994,6 +2079,7 @@ async function generateOpnameExcel(periodKey){
        pembulatan floating-point (mis. "236798418,5") yang bikin laporan
        terlihat kurang rapi -- dan setiap sel angka diberi format bawaan
        Excel (lihat XLFMT_* di atas) supaya tampil dengan pemisah ribuan. */
+    const SUMMARY_COLS = 6;
     const summaryRows = [
       ['ALIRE SAJIAN NUSANTARA'],
       ['Laporan Stock Opname — ' + periodLabel(periodKey)],
@@ -2002,13 +2088,14 @@ async function generateOpnameExcel(periodKey){
       [],
       ['Ringkasan Eksekutif'],
     ];
+    const rowExecLabel = summaryRows.length - 1;
     const rowTotalValue = summaryRows.length; summaryRows.push(['Total Nilai Stok', Math.round(totalValue)]);
     const rowTotalUsed = summaryRows.length; summaryRows.push(['Total Nilai Terpakai', Math.round(totalUsed)]);
     const rowNetSales = summaryRows.length; summaryRows.push(['Net Sales', netSales ? Math.round(netSales) : '']);
     const rowPct = summaryRows.length; summaryRows.push(['% Stok terhadap Sales', pct!==null ? Number(pct.toFixed(1)) : '']);
     summaryRows.push([]);
-    summaryRows.push(['Rincian per Lokasi']);
-    summaryRows.push(['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi']);
+    const rowLocLabel = summaryRows.length; summaryRows.push(['Rincian per Lokasi']);
+    const rowLocHeader = summaryRows.length; summaryRows.push(['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi']);
     const rowLocStart = summaryRows.length;
     const locRows = WAREHOUSES.map(w=>{
       const val = (session.locationValues||{})[w.id];
@@ -2021,8 +2108,13 @@ async function generateOpnameExcel(periodKey){
     }).filter(Boolean);
     if(locRows.length===0) summaryRows.push(['Belum ada lokasi yang selesai diopname','—','—','—','—','—']);
     else summaryRows.push(...locRows);
-    const wsSummary = XLSX.utils.aoa_to_sheet(summaryRows);
+    const rowLocEnd = summaryRows.length; // exclusive
+    const wsSummary = XLSXStyle.utils.aoa_to_sheet(summaryRows);
     wsSummary['!cols'] = [{wch:30},{wch:20},{wch:22},{wch:20},{wch:20},{wch:16}];
+    wsSummary['!merges'] = [
+      {s:{r:0,c:0}, e:{r:0,c:SUMMARY_COLS-1}},
+      {s:{r:1,c:0}, e:{r:1,c:SUMMARY_COLS-1}},
+    ];
     xlsxSetCellFormat(wsSummary, rowTotalValue, 1, XLFMT_RP);
     xlsxSetCellFormat(wsSummary, rowTotalUsed, 1, XLFMT_RP);
     xlsxSetCellFormat(wsSummary, rowNetSales, 1, XLFMT_RP);
@@ -2035,7 +2127,20 @@ async function generateOpnameExcel(periodKey){
       xlsxSetCellFormat(wsSummary, r, 4, XLFMT_RP);
       xlsxSetCellFormat(wsSummary, r, 5, XLFMT_PCT);
     }
-    XLSX.utils.book_append_sheet(wb, wsSummary, 'Ringkasan');
+    // Styling: judul, dua label section ("Ringkasan Eksekutif" / "Rincian
+    // per Lokasi") sebagai banner selebar tabel, mini-tabel ringkasan (2
+    // kolom) dan tabel rincian lokasi (6 kolom) masing-masing diberi
+    // border+zebra, header kolom tabel lokasi diberi warna terpisah.
+    xlCell(wsSummary, 0, 0).s = xlTitleStyle(14);
+    xlCell(wsSummary, 1, 0).s = xlTitleStyle(11);
+    xlStyleRow(wsSummary, 2, 2, xlMetaStyle());
+    xlStyleRow(wsSummary, 3, 2, xlMetaStyle());
+    xlStyleRow(wsSummary, rowExecLabel, SUMMARY_COLS, xlSubheaderStyle());
+    xlStyleBody(wsSummary, rowTotalValue, rowPct+1, 2, [1]);
+    xlStyleRow(wsSummary, rowLocLabel, SUMMARY_COLS, xlSubheaderStyle());
+    xlStyleRow(wsSummary, rowLocHeader, SUMMARY_COLS, xlHeaderStyle());
+    xlStyleBody(wsSummary, rowLocStart, rowLocEnd, SUMMARY_COLS, [1,2,3,4,5]);
+    XLSXStyle.utils.book_append_sheet(wb, wsSummary, 'Ringkasan');
 
     /* Satu sheet per lokasi yang punya detail per-barang (sama isinya
        dengan tabel "Detail Barang" per lokasi di laporan PDF). Nama sheet
@@ -2056,17 +2161,19 @@ async function generateOpnameExcel(periodKey){
         'Nilai Fisik': Math.round(it.nilaiFisik),
         'Keterangan': it.addedType==='wip' ? 'Tambahan WIP' : (it.addedType==='goods' ? 'Tambahan' : ''),
       }));
-      const ws = XLSX.utils.json_to_sheet(rows);
+      const ws = XLSXStyle.utils.json_to_sheet(rows);
       ws['!cols'] = [{wch:12},{wch:28},{wch:10},{wch:12},{wch:12},{wch:10},{wch:16},{wch:14}];
       xlsxSetColFormats(ws, {3: XLFMT_QTY, 4: XLFMT_QTY, 5: XLFMT_QTY, 6: XLFMT_RP}, 1);
+      xlStyleRow(ws, 0, 8, xlHeaderStyle());
+      xlStyleBody(ws, 1, rows.length+1, 8, [3,4,5,6]);
       let base = w.name.replace(/[\\\/\?\*\[\]:]/g,'').slice(0,31) || w.id;
       let finalName = base, n = 2;
       while(usedSheetNames.has(finalName)){ finalName = (base.slice(0,28) + '_' + n); n++; }
       usedSheetNames.add(finalName);
-      XLSX.utils.book_append_sheet(wb, ws, finalName);
+      XLSXStyle.utils.book_append_sheet(wb, ws, finalName);
     }
 
-    XLSX.writeFile(wb, 'Stock_Opname_' + periodKey + '.xlsx');
+    XLSXStyle.writeFile(wb, 'Stock_Opname_' + periodKey + '.xlsx');
     toast('Laporan Excel berhasil dibuat.');
   }catch(err){
     toast('Gagal membuat laporan Excel: ' + (err && err.message ? err.message : 'terjadi kesalahan'), true);
@@ -2787,11 +2894,10 @@ function renderDashboard(){
             <div class="ln-pct">${x.pct.toFixed(0)}%</div>
           </div>`).join('')}
       ${peruntukanTotals.length===0 ? '' : `
-      <div class="locsum-row" style="background:var(--surface-2);">
-        <div class="ln-name" style="font-weight:800; font-size:14px;">Total</div>
-        <div class="ln-value" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(storageGrandTotal) : fmtNum(storageGrandTotal)}</div>
-        <div class="ln-track"></div>
-        <div class="ln-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
+      <div class="loc-row dash-total-row" style="background:var(--surface-2);">
+        <div class="lr-name" style="font-weight:800; font-size:14px;">Total</div>
+        <div class="lr-val" style="font-weight:800; font-size:16px; width:140px;">${mode==='value' ? fmtIDR(storageGrandTotal) : fmtNum(storageGrandTotal)}</div>
+        <div class="lr-pct" style="font-weight:800; font-size:13px; color:var(--text);">100%</div>
       </div>`}
     </div>
 
@@ -3920,11 +4026,15 @@ function exportOpnameTemplateAll(){
     }
   });
   if(rows.length===0){ toast('Tidak ada barang untuk diekspor.', true); return; }
-  const ws = XLSX.utils.json_to_sheet(rows);
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const COLS = 7;
+  const ws = XLSXStyle.utils.json_to_sheet(rows);
   ws['!cols'] = [{wch:18},{wch:12},{wch:34},{wch:16},{wch:14},{wch:13},{wch:13}];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Template Opname');
-  XLSX.writeFile(wb, 'Template_Opname_Semua_Lokasi_' + periodKey + '.xlsx');
+  xlStyleRow(ws, 0, COLS, xlHeaderStyle());
+  xlStyleBody(ws, 1, rows.length+1, COLS, [5,6]);
+  const wb = XLSXStyle.utils.book_new();
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Template Opname');
+  XLSXStyle.writeFile(wb, 'Template_Opname_Semua_Lokasi_' + periodKey + '.xlsx');
   toast('Template Excel semua lokasi berhasil diunduh (' + rows.length + ' baris).');
 }
 function handleOpnameImportAllFile(inputEl){
@@ -4949,11 +5059,16 @@ function exportItemsExcel(){
     };
   });
   if(rows.length===0){ toast('Tidak ada barang untuk diekspor.', true); return; }
-  const ws = XLSX.utils.json_to_sheet(rows);
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const COLS = 10;
+  const ws = XLSXStyle.utils.json_to_sheet(rows);
   ws['!cols'] = [{wch:14},{wch:28},{wch:16},{wch:12},{wch:10},{wch:12},{wch:22},{wch:14},{wch:18},{wch:14}];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Barang');
-  XLSX.writeFile(wb, 'barang-export.xlsx');
+  xlsxSetColFormats(ws, {3: XLFMT_QTY, 6: XLFMT_QTY, 7: XLFMT_RP, 8: XLFMT_RP, 9: XLFMT_QTY}, 1);
+  xlStyleRow(ws, 0, COLS, xlHeaderStyle());
+  xlStyleBody(ws, 1, rows.length+1, COLS, [3,6,7,8,9]);
+  const wb = XLSXStyle.utils.book_new();
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Barang');
+  XLSXStyle.writeFile(wb, 'barang-export.xlsx');
 }
 function renderItemsMaster(){
   const role = currentRole();
@@ -5833,12 +5948,13 @@ function reportOpnameR1Html(){
   `;
 }
 async function exportReport1Excel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const asOf = state.reportOpname.asOf;
   let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
   if(!groups){ toast('Data belum siap, coba lagi sebentar.', true); return; }
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
   const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
+  const COLS = 8;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Stock Opname — ' + asOfLabel],
@@ -5848,27 +5964,43 @@ async function exportReport1Excel(){
   ];
   const merges = [ {s:{r:0,c:0}, e:{r:0,c:7}}, {s:{r:1,c:0}, e:{r:1,c:7}} ];
   const headerRowIdx = aoa.length - 1;
+  const subheaderRows = [];
+  const totalRows = [];
   let grand = 0;
   groups.forEach(g=>{
     merges.push({ s:{r:aoa.length,c:0}, e:{r:aoa.length,c:7} });
+    subheaderRows.push(aoa.length);
     aoa.push([divisionLabel(g.id),'','','','','','','']);
     g.rows.forEach(r=>{
       const disp = opnameSmallDisplay(itemById(r.itemId), r.qty);
       aoa.push([r.no, r.name, r.category||'', r.penyimpanan, disp.qty, disp.unit||'', Math.round(disp.unitPrice), Math.round(r.jumlah)]);
     });
+    totalRows.push(aoa.length);
     aoa.push(['','','','','','','Subtotal '+divisionLabel(g.id), Math.round(g.subtotal)]);
     grand += g.subtotal;
   });
+  const grandTotalRow = aoa.length;
   aoa.push(['','','','','','','GRAND TOTAL', Math.round(grand)]);
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
   ws['!cols'] = [{wch:5},{wch:30},{wch:18},{wch:18},{wch:12},{wch:9},{wch:14},{wch:16}];
   // Format angka: kolom Stock Akhir (kuantitas) dan Harga Satuan/Jumlah
   // (Rupiah) -- kolom No sengaja dibiarkan format bawaan karena cuma nomor urut.
   xlsxSetColFormats(ws, {4: XLFMT_QTY, 6: XLFMT_RP, 7: XLFMT_RP}, headerRowIdx+1);
-  XLSX.utils.book_append_sheet(wb, ws, 'Stock Opname');
-  XLSX.writeFile(wb, 'Laporan_Stock_Opname_' + (asOf==='live'?currentPeriodKey():asOf) + '.xlsx');
+  // Styling: judul lalu header kolom lalu badan tabel (border+zebra) dulu,
+  // baru baris sub-header (nama divisi) dan subtotal/grand total ditimpa di
+  // atasnya supaya baris-baris itu tampil beda (bukan ikut pola body biasa).
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, 2, 2, xlMetaStyle());
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow+1, COLS, [0,4,6,7]);
+  subheaderRows.forEach(r=>xlStyleRow(ws, r, COLS, xlSubheaderStyle()));
+  totalRows.forEach(r=>xlStyleRow(ws, r, COLS, xlTotalStyle()));
+  xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Stock Opname');
+  XLSXStyle.writeFile(wb, 'Laporan_Stock_Opname_' + (asOf==='live'?currentPeriodKey():asOf) + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport1Pdf(){
@@ -5988,25 +6120,34 @@ function reportOpnameR2Html(){
   `;
 }
 async function exportReport2Excel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const periodKey = state.reportOpname.period;
   if(!state.reportOpname.purchaseCache[periodKey]){ toast('Data pembelian belum siap, coba lagi sebentar.', true); return; }
   const rows = report2Rows(periodKey);
   const grand = rows.reduce((acc,r)=>{ acc.o+=r.opening||0; acc.p+=r.purchase||0; acc.c+=r.closing||0; if(r.usage!=null) acc.u+=r.usage; return acc; }, {o:0,p:0,c:0,u:0});
+  const COLS = 5;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Nilai Penggunaan per Divisi — ' + periodLabel(periodKey)],
     [],
     ['Divisi','Opening Inventory','Purchase','Closing Inventory','Inventory Usage'],
-    ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'':r.opening, r.purchase||0, r.closing==null?'':r.closing, r.usage==null?'':r.usage]),
-    ['Grand Total', grand.o, grand.p, grand.c, grand.u],
+    ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'':Math.round(r.opening), Math.round(r.purchase||0), r.closing==null?'':Math.round(r.closing), r.usage==null?'':Math.round(r.usage)]),
+    ['Grand Total', Math.round(grand.o), Math.round(grand.p), Math.round(grand.c), Math.round(grand.u)],
   ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const headerRowIdx = 3;
+  const grandTotalRow = aoa.length - 1;
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
   ws['!cols'] = [{wch:22},{wch:18},{wch:18},{wch:18},{wch:18}];
-  XLSX.utils.book_append_sheet(wb, ws, 'Nilai Penggunaan');
-  XLSX.writeFile(wb, 'Nilai_Penggunaan_Divisi_' + periodKey + '.xlsx');
+  xlsxSetColFormats(ws, {1:XLFMT_RP, 2:XLFMT_RP, 3:XLFMT_RP, 4:XLFMT_RP}, headerRowIdx+1);
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow, COLS, [1,2,3,4]);
+  xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Nilai Penggunaan');
+  XLSXStyle.writeFile(wb, 'Nilai_Penggunaan_Divisi_' + periodKey + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport2Pdf(){
@@ -6109,23 +6250,30 @@ function reportOpnameR3Html(){
   `;
 }
 async function exportReport3Excel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const periodKey = state.reportOpname.period;
   if(!state.reportOpname.purchaseCache[periodKey]){ toast('Data pembelian belum siap, coba lagi sebentar.', true); return; }
   const rows = report3Rows(periodKey);
+  const COLS = 4;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Food & Beverage Cost — ' + periodLabel(periodKey)],
     [],
     ['Jenis Cost','Actual Cost','Net Sales','Actual COGS (%)'],
-    ...rows.map(r=>[r.label, r.actual, r.hasNs?r.netSales:'', r.hasNs?Number((r.actual/r.netSales*100).toFixed(2)):'Net Sales belum diisi']),
+    ...rows.map(r=>[r.label, Math.round(r.actual), r.hasNs?Math.round(r.netSales):'', r.hasNs?Number((r.actual/r.netSales*100).toFixed(2)):'Net Sales belum diisi']),
   ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const headerRowIdx = 3;
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:3}}, {s:{r:1,c:0}, e:{r:1,c:3}} ];
   ws['!cols'] = [{wch:16},{wch:18},{wch:18},{wch:16}];
-  XLSX.utils.book_append_sheet(wb, ws, 'FB Cost');
-  XLSX.writeFile(wb, 'FB_Cost_' + periodKey + '.xlsx');
+  xlsxSetColFormats(ws, {1:XLFMT_RP, 2:XLFMT_RP, 3:XLFMT_PCT}, headerRowIdx+1);
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, aoa.length, COLS, [1,2,3]);
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'FB Cost');
+  XLSXStyle.writeFile(wb, 'FB_Cost_' + periodKey + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport3Pdf(){
@@ -6193,30 +6341,45 @@ function reportOpnameR4Html(){
   `;
 }
 async function exportReport4Excel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const data = report4Data();
   if(!data.length){ toast('Belum ada data untuk diekspor.', true); return; }
+  const COLS = data.length + 1;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['KPI Ideal Stock'],
     [],
     ['Indikator', ...data.map(d=>periodLabel(d.periodKey))],
-    ['Total Nilai Stok', ...data.map(d=>d.totalStock)],
-    ['Net Sales', ...data.map(d=>d.hasNs?d.netSales:'')],
+    ['Total Nilai Stok', ...data.map(d=>Math.round(d.totalStock))],
+    ['Net Sales', ...data.map(d=>d.hasNs?Math.round(d.netSales):'')],
     ['% Stock vs Sales', ...data.map(d=>d.pct!=null?Number(d.pct.toFixed(2)):'')],
-    [],
-    ['Rincian per Divisi (nilai, lalu % dari Sales bulan itu)'],
-    ...REPORT_OPNAME_GROUPS.flatMap(g=>[
-      [divisionLabel(g.id), ...data.map(d=>(d.groupValues[g.id]&&d.groupValues[g.id].total)||0)],
-      ['  % dari Sales', ...data.map(d=>{ const val=(d.groupValues[g.id]&&d.groupValues[g.id].total)||0; return d.hasNs ? Number((val/d.netSales*100).toFixed(2)) : ''; })],
-    ]),
   ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const headerRowIdx = 3;
+  const indicatorRowsEnd = aoa.length;
+  aoa.push([]);
+  aoa.push(['Rincian per Divisi (nilai, lalu % dari Sales bulan itu)']);
+  const divLabelRow = aoa.length - 1;
+  const divRows = [];
+  const pctRows = [];
+  REPORT_OPNAME_GROUPS.forEach(g=>{
+    divRows.push(aoa.length);
+    aoa.push([divisionLabel(g.id), ...data.map(d=>(d.groupValues[g.id]&&d.groupValues[g.id].total)||0)]);
+    pctRows.push(aoa.length);
+    aoa.push(['  % dari Sales', ...data.map(d=>{ const val=(d.groupValues[g.id]&&d.groupValues[g.id].total)||0; return d.hasNs ? Number((val/d.netSales*100).toFixed(2)) : ''; })]);
+  });
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:data.length}}, {s:{r:1,c:0}, e:{r:1,c:data.length}} ];
   ws['!cols'] = [{wch:22}, ...data.map(()=>({wch:16}))];
-  XLSX.utils.book_append_sheet(wb, ws, 'KPI Ideal Stock');
-  XLSX.writeFile(wb, 'KPI_Ideal_Stock.xlsx');
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, indicatorRowsEnd, COLS, data.map((_,i)=>i+1));
+  xlStyleRow(ws, divLabelRow, COLS, xlSubheaderStyle());
+  divRows.forEach(r=>xlStyleRow(ws, r, COLS, xlSubheaderStyle()));
+  pctRows.forEach(r=>xlStyleRow(ws, r, COLS, xlMetaStyle()));
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'KPI Ideal Stock');
+  XLSXStyle.writeFile(wb, 'KPI_Ideal_Stock.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport4Pdf(){
@@ -6335,9 +6498,10 @@ function reportMasukFilteredDocs(){
   return docs.filter(d => inDateRange(d.createdAt, state.reportMasukDateFrom, state.reportMasukDateTo));
 }
 async function exportReportMasukExcel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const docs = reportMasukFilteredDocs();
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const COLS = 5;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Barang Masuk'],
@@ -6345,20 +6509,29 @@ async function exportReportMasukExcel(){
     [],
     ['Tanggal','No. Penerimaan','Supplier','Lokasi','Total Nilai'],
   ];
+  const headerRowIdx = aoa.length - 1;
   let grand = 0;
   docs.forEach(d=>{
     const first = d.lines[0];
     const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
     grand += total;
-    aoa.push([fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), total]);
+    aoa.push([fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), Math.round(total)]);
   });
-  aoa.push(['','','','Grand Total', grand]);
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const grandTotalRow = aoa.length;
+  aoa.push(['','','','Grand Total', Math.round(grand)]);
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
   ws['!cols'] = [{wch:18},{wch:16},{wch:26},{wch:20},{wch:16}];
-  XLSX.utils.book_append_sheet(wb, ws, 'Barang Masuk');
-  XLSX.writeFile(wb, 'Laporan_Barang_Masuk.xlsx');
+  xlsxSetColFormats(ws, {4: XLFMT_RP}, headerRowIdx+1);
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, 2, 2, xlMetaStyle());
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow, COLS, [4]);
+  xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Barang Masuk');
+  XLSXStyle.writeFile(wb, 'Laporan_Barang_Masuk.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReportMasukPdf(){
@@ -6453,9 +6626,10 @@ function reportKeluarFilteredLines(){
   return lines.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
 }
 async function exportReportKeluarExcel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const lines = reportKeluarFilteredLines();
   if(!lines.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const COLS = 9;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Barang Bergerak'],
@@ -6463,19 +6637,28 @@ async function exportReportKeluarExcel(){
     [],
     ['Tanggal','No. Transfer','No. SR','Dari','Ke','Barang','Jumlah','Satuan','Nilai'],
   ];
+  const headerRowIdx = aoa.length - 1;
   let grand = 0;
   lines.forEach(l=>{
     grand += (l.totalValue||0);
     const item = itemById(l.itemId);
-    aoa.push([fmtDate(l.createdAt), l.docNumber||'—', l.requestDocNumber||'—', l.fromWarehouseName||'', l.toWarehouseName||'', l.itemName||'', l.qty||0, l.uom||(item&&item.uom)||'', l.totalValue||0]);
+    aoa.push([fmtDate(l.createdAt), l.docNumber||'—', l.requestDocNumber||'—', l.fromWarehouseName||'', l.toWarehouseName||'', l.itemName||'', l.qty||0, l.uom||(item&&item.uom)||'', Math.round(l.totalValue||0)]);
   });
-  aoa.push(['','','','','','','','Grand Total', grand]);
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const grandTotalRow = aoa.length;
+  aoa.push(['','','','','','','','Grand Total', Math.round(grand)]);
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:8}}, {s:{r:1,c:0}, e:{r:1,c:8}} ];
   ws['!cols'] = [{wch:18},{wch:14},{wch:14},{wch:16},{wch:16},{wch:26},{wch:10},{wch:10},{wch:14}];
-  XLSX.utils.book_append_sheet(wb, ws, 'Barang Bergerak');
-  XLSX.writeFile(wb, 'Laporan_Barang_Bergerak.xlsx');
+  xlsxSetColFormats(ws, {6: XLFMT_QTY, 8: XLFMT_RP}, headerRowIdx+1);
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, 2, 2, xlMetaStyle());
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow, COLS, [6,8]);
+  xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Barang Bergerak');
+  XLSXStyle.writeFile(wb, 'Laporan_Barang_Bergerak.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReportKeluarPdf(){
@@ -6633,35 +6816,57 @@ function reportWipFilteredData(){
   return { docs, itemRows, divisiRows };
 }
 async function exportReportWipExcel(){
-  if(!window.XLSX){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const { docs, itemRows, divisiRows } = reportWipFilteredData();
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const COLS = 5;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Pencatatan WIP'],
     ['Dicetak', fmtDate(new Date().toISOString())],
     [],
-    ['Barang WIP Paling Sering Diminta'],
-    ['Barang','Frekuensi','Total Jumlah','Satuan'],
-    ...itemRows.map(r=>[r.name, r.count, r.qty, r.uom||'']),
-    [],
-    ['Divisi Paling Sering Terlibat'],
-    ['Divisi','Frekuensi'],
-    ...divisiRows.map(r=>[r.name, r.count]),
-    [],
-    ['Riwayat Permintaan WIP Tercatat'],
-    ['No. Permintaan','Tanggal','Divisi','Barang','Jumlah Baris'],
-    ...docs.map(d=>{
-      const first = d.lines[0];
-      return [d.docNumber, fmtDate(d.createdAt), first.divisionName||'—', d.lines.map(l=>l.itemName).join(', '), d.lines.length];
-    }),
   ];
-  const wb = XLSX.utils.book_new();
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  aoa.push(['Barang WIP Paling Sering Diminta']);
+  const sec1LabelRow = aoa.length - 1;
+  aoa.push(['Barang','Frekuensi','Total Jumlah','Satuan']);
+  const sec1HeaderRow = aoa.length - 1;
+  itemRows.forEach(r=>aoa.push([r.name, r.count, r.qty, r.uom||'']));
+  const sec1BodyEnd = aoa.length;
+  aoa.push([]);
+  aoa.push(['Divisi Paling Sering Terlibat']);
+  const sec2LabelRow = aoa.length - 1;
+  aoa.push(['Divisi','Frekuensi']);
+  const sec2HeaderRow = aoa.length - 1;
+  divisiRows.forEach(r=>aoa.push([r.name, r.count]));
+  const sec2BodyEnd = aoa.length;
+  aoa.push([]);
+  aoa.push(['Riwayat Permintaan WIP Tercatat']);
+  const sec3LabelRow = aoa.length - 1;
+  aoa.push(['No. Permintaan','Tanggal','Divisi','Barang','Jumlah Baris']);
+  const sec3HeaderRow = aoa.length - 1;
+  docs.forEach(d=>{
+    const first = d.lines[0];
+    aoa.push([d.docNumber, fmtDate(d.createdAt), first.divisionName||'—', d.lines.map(l=>l.itemName).join(', '), d.lines.length]);
+  });
+  const sec3BodyEnd = aoa.length;
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
   ws['!cols'] = [{wch:30},{wch:14},{wch:14},{wch:30},{wch:14}];
-  XLSX.utils.book_append_sheet(wb, ws, 'Pencatatan WIP');
-  XLSX.writeFile(wb, 'Laporan_Pencatatan_WIP.xlsx');
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, 2, 2, xlMetaStyle());
+  xlStyleRow(ws, sec1LabelRow, COLS, xlSubheaderStyle());
+  xlStyleRow(ws, sec1HeaderRow, 4, xlHeaderStyle());
+  xlStyleBody(ws, sec1HeaderRow+1, sec1BodyEnd, 4, [1,2]);
+  xlStyleRow(ws, sec2LabelRow, COLS, xlSubheaderStyle());
+  xlStyleRow(ws, sec2HeaderRow, 2, xlHeaderStyle());
+  xlStyleBody(ws, sec2HeaderRow+1, sec2BodyEnd, 2, [1]);
+  xlStyleRow(ws, sec3LabelRow, COLS, xlSubheaderStyle());
+  xlStyleRow(ws, sec3HeaderRow, COLS, xlHeaderStyle());
+  xlStyleBody(ws, sec3HeaderRow+1, sec3BodyEnd, COLS, [4]);
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Pencatatan WIP');
+  XLSXStyle.writeFile(wb, 'Laporan_Pencatatan_WIP.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReportWipPdf(){
@@ -7783,12 +7988,17 @@ async function submitEditItem(itemId){
 
 /* --- Bulk import --- */
 function downloadTemplate(){
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const COLS = 6;
   const wsData = [['Nama Barang','Kode Barang','Kategori','Satuan','Harga','Reorder Level'], ['cth. Beras Premium 5kg','INV-0001', ITEM_CATEGORIES[0], 'kg', 65000, 10]];
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
+  const ws = XLSXStyle.utils.aoa_to_sheet(wsData);
   ws['!cols'] = [{wch:28},{wch:14},{wch:20},{wch:10},{wch:10},{wch:12}];
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Barang');
-  XLSX.writeFile(wb, 'template-barang.xlsx');
+  xlsxSetColFormats(ws, {4: XLFMT_RP, 5: XLFMT_QTY}, 1);
+  xlStyleRow(ws, 0, COLS, xlHeaderStyle());
+  xlStyleBody(ws, 1, wsData.length, COLS, [4,5]);
+  const wb = XLSXStyle.utils.book_new();
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Barang');
+  XLSXStyle.writeFile(wb, 'template-barang.xlsx');
 }
 let importRows = [];
 function openImportModal(){
@@ -8000,7 +8210,6 @@ function render(){
   if(savedAccount){ authedUsername = savedAccount.username; state.role = savedAccount.roleId; showApp(); }
   else { showLogin(); }
 })();
-
 </script>
 </body>
 </html>
