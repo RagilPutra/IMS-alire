@@ -18,6 +18,19 @@ if (!APP_KEY) {
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
+// ---- Static icon/manifest files (favicon, Add-to-Home-Screen / PWA icons).
+// Served as real files (not embedded data: URIs) because Chrome/Android in
+// particular are unreliable about picking up data-URI favicons and manifest
+// icons -- real fetchable URLs are the standard, broadly-compatible way to
+// do this and what "Add to Home Screen" install flows expect. Registered
+// before the app.get('*', serveIndex) catch-all below so these exact paths
+// are served as files, not swallowed by the SPA fallback.
+app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: '1h' }));
+app.get('/manifest.webmanifest', (req, res) => {
+  res.type('application/manifest+json');
+  res.sendFile(path.join(__dirname, '..', 'public', 'manifest.webmanifest'));
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB, matches the frontend's own client-side check
