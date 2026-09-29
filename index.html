@@ -35,6 +35,11 @@
     --radius-sm:5px;
     --font-ui:'Manrope',-apple-system,BlinkMacSystemFont,sans-serif;
     --font-display:'Manrope',-apple-system,BlinkMacSystemFont,sans-serif;
+    /* User-resizable sidebar width (see .sidebar-resize-handle + initSidebarResize()) --
+       read from localStorage at boot and dragged live via this var, so every
+       rule that depends on the sidebar's width (the sidebar itself and the
+       handle's own position) stays in sync from one source of truth. */
+    --sidebar-width:244px;
     padding-top:env(safe-area-inset-top,0px);
     padding-bottom:env(safe-area-inset-bottom,0px);
     box-sizing:border-box;
@@ -52,12 +57,29 @@
 
   /* ---------- Sidebar ---------- */
   .sidebar{
-    width:216px; flex-shrink:0; background:var(--sidebar-bg); border-right:1px solid var(--border);
+    width:var(--sidebar-width, 244px); flex-shrink:0; background:var(--sidebar-bg); border-right:1px solid var(--border);
     display:flex; flex-direction:column; padding:0;
     padding-top:env(safe-area-inset-top,0px);
     height:100vh; height:100dvh;
     position:sticky; top:0; align-self:flex-start;
   }
+  /* Drag handle for resizing the sidebar -- a thin fixed strip that always
+     sits right at the sidebar's current right edge (same --sidebar-width
+     var the sidebar itself uses, so it tracks live while dragging). It's a
+     sibling of <nav class="sidebar">, not a child, so it survives the
+     sidebar's innerHTML being fully rebuilt on every render() (see the
+     comment in renderShell()). Widened hit-area via negative margin so it's
+     easy to grab without needing pixel-perfect precision. */
+  .sidebar-resize-handle{
+    position:fixed; top:0; bottom:0; left:var(--sidebar-width, 244px);
+    width:9px; margin-left:-4px; z-index:12; cursor:col-resize; background:transparent;
+    touch-action:none;
+  }
+  .sidebar-resize-handle::after{content:''; position:absolute; top:0; bottom:0; left:4px; width:2px; background:transparent;}
+  .sidebar-resize-handle:hover::after, .sidebar-resize-handle.dragging::after{background:var(--gold);}
+  body.sidebar-resizing{cursor:col-resize; user-select:none;}
+  body.sidebar-resizing .sidebar-resize-handle::after{background:var(--gold);}
+  @media (max-width:900px){ .sidebar-resize-handle{display:none;} }
   .brand-row{display:flex; flex-direction:column; align-items:center; gap:8px; padding:24px 18px 20px; text-align:center; border-bottom:1px solid var(--border); margin-bottom:6px;}
   .brand-row img{height:28px; width:auto; display:block;}
   .brand-row .brand-caption{font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:var(--text-faint);}
@@ -84,6 +106,17 @@
   .nav-item:hover{background:var(--surface-2); color:var(--text);}
   .nav-item.active{background:var(--nav-active-bg); color:var(--brand-dark); font-weight:700;}
   .nav-item svg{width:15px; height:15px; flex-shrink:0; opacity:.8;}
+  /* The label span had no width/white-space rule at all, so it used the flex
+     default (min-width:auto), which lets a flex child shrink down to its
+     text's min-content width -- i.e. wrap onto a 2nd line -- the instant
+     available space runs a little tight. How tight "tight" is depends on
+     exact glyph widths, which shift slightly with the rendering browser/OS
+     and whether the Manrope webfont has finished loading yet (a plain
+     system-font fallback is very slightly wider), so the same 244px sidebar
+     could wrap "Stok Rendah"/"Laporan Stock Opname" in one browser and not
+     another even with identical CSS. Force single-line + ellipsis instead,
+     so it never depends on those margins. */
+  .nav-item span{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .nav-badge{margin-left:auto; background:var(--warning); color:#2A1E0C; font-size:10.5px; font-weight:800; border-radius:20px; padding:1px 6px; min-width:16px; text-align:center;}
   .nav-dot-group{margin-left:auto; display:flex; gap:3px; flex-shrink:0;}
   .nav-dot{font-size:10px; font-weight:800; border-radius:20px; padding:1px 6px; min-width:16px; text-align:center;}
@@ -399,7 +432,7 @@
   .drawer-stat-value{font-family:var(--font-ui); font-size:24px; font-weight:800; margin-top:3px; font-variant-numeric:tabular-nums;}
   .drawer-section-label{font-size:10.5px; font-weight:800; letter-spacing:.05em; text-transform:uppercase; color:var(--text-faint); margin:18px 0 8px;}
   .drawer-section-label:first-child{margin-top:0;}
-  .loc-row{display:flex; justify-content:space-between; padding:6px 0; font-size:12.5px; border-bottom:1px solid var(--border);}
+  .loc-row{display:flex; align-items:center; justify-content:space-between; padding:6px 0; font-size:12.5px; border-bottom:1px solid var(--border);}
   .loc-row:last-child{border-bottom:none;}
   .loc-row .lr-name{font-weight:600;}
   .loc-row .lr-val{font-variant-numeric:tabular-nums; font-weight:700;}
@@ -418,7 +451,7 @@
      (built for the other column's progress bars), so the value+pct columns
      line up straight down the whole panel and the longer label never wraps. */
   .dash-total-row{justify-content:flex-start; padding:10px 12px; margin:8px 16px 14px; border-radius:6px;}
-  .dash-total-row .lr-name{flex:1; min-width:0; white-space:nowrap;}
+  .dash-total-row .lr-name{flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
   .dash-total-row .lr-val{width:118px; flex-shrink:0; text-align:right;}
   .dash-total-row .lr-pct{width:36px; flex-shrink:0; text-align:right; margin-left:10px; color:var(--text);}
 
@@ -535,6 +568,7 @@
 <body>
 <div class="app" id="appRoot" style="display:none;">
   <nav class="sidebar" id="sidebar"></nav>
+  <div class="sidebar-resize-handle" id="sidebarResizeHandle" title="Geser untuk mengubah lebar sidebar (klik ganda untuk reset)"></div>
   <div class="main">
     <div class="mobile-sticky-head">
       <div class="mobile-topnav" id="mobileNav"></div>
@@ -8201,10 +8235,77 @@ function render(){
 }
 
 /* =========================================================
+   SIDEBAR RESIZE
+   ---------------------------------------------------------
+   User-draggable sidebar width, so nobody has to rely on the label
+   ellipsis (see .nav-item span) fitting their particular menu labels --
+   they can just widen the sidebar themselves. Width lives in the
+   --sidebar-width CSS var (one source of truth the sidebar and the drag
+   handle both read) and persists per-browser via localStorage, since it's
+   a per-viewer display preference, not shared app data.
+========================================================= */
+const SIDEBAR_WIDTH_MIN = 200;
+const SIDEBAR_WIDTH_MAX = 420;
+const SIDEBAR_WIDTH_DEFAULT = 244;
+function currentSidebarWidth(){
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width');
+  const n = parseInt(v, 10);
+  return isNaN(n) ? SIDEBAR_WIDTH_DEFAULT : n;
+}
+function applySidebarWidth(px){
+  const clamped = Math.max(SIDEBAR_WIDTH_MIN, Math.min(SIDEBAR_WIDTH_MAX, px));
+  document.documentElement.style.setProperty('--sidebar-width', clamped + 'px');
+  return clamped;
+}
+function initSidebarResize(){
+  const handle = document.getElementById('sidebarResizeHandle');
+  if(!handle) return;
+  const saved = parseInt(localStorage.getItem('inv_sidebar_width'), 10);
+  if(!isNaN(saved)) applySidebarWidth(saved);
+  let dragging = false, startX = 0, startWidth = SIDEBAR_WIDTH_DEFAULT;
+  function onMove(clientX){ if(dragging) applySidebarWidth(startWidth + (clientX - startX)); }
+  function onMouseMove(e){ onMove(e.clientX); }
+  function onTouchMove(e){ if(e.touches && e.touches[0]) onMove(e.touches[0].clientX); }
+  function endDrag(){
+    if(!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.classList.remove('sidebar-resizing');
+    localStorage.setItem('inv_sidebar_width', String(currentSidebarWidth()));
+    document.removeEventListener('mousemove', onMouseMove);
+    document.removeEventListener('mouseup', endDrag);
+    document.removeEventListener('touchmove', onTouchMove);
+    document.removeEventListener('touchend', endDrag);
+  }
+  function startDrag(clientX){
+    dragging = true; startX = clientX; startWidth = currentSidebarWidth();
+    handle.classList.add('dragging');
+    document.body.classList.add('sidebar-resizing');
+  }
+  handle.addEventListener('mousedown', (e)=>{
+    e.preventDefault();
+    startDrag(e.clientX);
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', endDrag);
+  });
+  handle.addEventListener('touchstart', (e)=>{
+    if(!e.touches || !e.touches[0]) return;
+    startDrag(e.touches[0].clientX);
+    document.addEventListener('touchmove', onTouchMove, {passive:true});
+    document.addEventListener('touchend', endDrag);
+  }, {passive:true});
+  handle.addEventListener('dblclick', ()=>{
+    applySidebarWidth(SIDEBAR_WIDTH_DEFAULT);
+    localStorage.setItem('inv_sidebar_width', String(SIDEBAR_WIDTH_DEFAULT));
+  });
+}
+
+/* =========================================================
    BOOTSTRAP
 ========================================================= */
 (function boot(){
   initAuthUsers();
+  initSidebarResize();
   const savedUsername = localStorage.getItem('inv_auth_user');
   const savedAccount = findAccountByUsername(savedUsername);
   if(savedAccount){ authedUsername = savedAccount.username; state.role = savedAccount.roleId; showApp(); }
