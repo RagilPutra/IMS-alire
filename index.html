@@ -1884,6 +1884,15 @@ function xlsxSetCellFormat(ws, r, c, fmt){
   const addr = XLSX.utils.encode_cell({r, c});
   if(ws[addr] && ws[addr].t === 'n') ws[addr].z = fmt;
 }
+// Terapkan satu format angka ke satu baris penuh (kolom colFrom..colTo-1) --
+// dipakai untuk laporan yang metriknya di BARIS dan periodenya di KOLOM
+// (mis. KPI Ideal Stock: "Total Nilai Stok"/"Net Sales" per baris, tiap
+// bulan jadi kolom sendiri) -- beda dari xlsxSetColFormats di bawah yang
+// menerapkan satu format ke satu kolom di semua baris, cocok untuk laporan
+// yang arahnya sebaliknya (field di kolom, baris per record).
+function xlsxSetRowFormat(ws, r, colFrom, colTo, fmt){
+  for(let c=colFrom; c<colTo; c++) xlsxSetCellFormat(ws, r, c, fmt);
+}
 // Terapkan format ke kolom tertentu di semua baris (dari startRow s/d baris
 // terakhir terisi) -- aman dipakai walau kolom yang sama berisi teks di
 // sebagian baris (judul/label/subtotal), karena hanya sel bertipe angka yang
@@ -4063,6 +4072,10 @@ function exportOpnameTemplateAll(){
   const rows = [];
   WAREHOUSES.forEach(w=>{
     const addedItemIds = new Set();
+    // Peruntukan (alokasi Kitchen/Bar/dst. dalam satu lokasi) cuma berlaku
+    // untuk stok yang duduk di Gudang Utama (lihat catatan di komentar
+    // "STOCK OPNAME" di atas) -- di lokasi lain kolom ini dikosongkan.
+    const showPeruntukan = isStorageWarehouse(w.id);
     state.items.forEach(item=>{
       const qty = stockQty(w.id, item.id);
       if(qty <= 0) return;
@@ -4070,6 +4083,11 @@ function exportOpnameTemplateAll(){
       const useSmall = srHasSmallUnit(item);
       const unit = useSmall ? item.smallUnit : item.uom;
       const displayQty = useSmall ? qty * item.conversionQty : qty;
+      let peruntukanLabel = '';
+      if(showPeruntukan){
+        const parts = PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(w.id, item.id, p.id)})).filter(p=>p.qty>0);
+        peruntukanLabel = parts.length ? parts.map(p=>p.name+' - '+fmtNum(useSmall ? p.qty*item.conversionQty : p.qty)).join(' · ') : '—';
+      }
       rows.push({
         'Lokasi': w.name,
         'Kode': item.kode || '',
@@ -4077,6 +4095,11 @@ function exportOpnameTemplateAll(){
         'Kategori': item.category || '',
         'Satuan Hitung': unit || '',
         'Stok Sistem': Math.round(displayQty*1000)/1000,
+        // Kolom info -- rincian Stok Sistem di atas per Peruntukan, cuma
+        // untuk dibaca sambil menghitung fisik, TIDAK dibaca ulang saat
+        // import (lihat handleOpnameImportAllFile: selisih hasil opname di
+        // Gudang Utama selalu dibebankan ke Mix Use, sesuai catatan di atas).
+        'Peruntukan': peruntukanLabel,
         // Sengaja dikosongkan (bukan diisi Stok Sistem) supaya yang menghitung
         // fisik benar-benar mengisi angka hasil hitungannya sendiri, bukan
         // sekadar melihat angka sistem yang sudah ada -- dan baris yang tidak
@@ -4099,6 +4122,7 @@ function exportOpnameTemplateAll(){
           'Kategori': item.category,
           'Satuan Hitung': unit || '',
           'Stok Sistem': 0,
+          'Peruntukan': showPeruntukan ? '—' : '',
           'Jumlah Fisik': '',
         });
       });
@@ -4106,15 +4130,16 @@ function exportOpnameTemplateAll(){
   });
   if(rows.length===0){ toast('Tidak ada barang untuk diekspor.', true); return; }
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
-  const COLS = 7;
+  const COLS = 8;
   const ws = XLSXStyle.utils.json_to_sheet(rows);
-  ws['!cols'] = [{wch:18},{wch:12},{wch:34},{wch:16},{wch:14},{wch:13},{wch:13}];
+  ws['!cols'] = [{wch:18},{wch:12},{wch:34},{wch:16},{wch:14},{wch:13},{wch:30},{wch:13}];
   // Pemisah ribuan di "Stok Sistem" & "Jumlah Fisik" -- tanpa ini 5826 dan
   // 5000 gampang kebaca/ketik salah jadi kelebihan/kekurangan angka nol,
   // padahal file ini yang menentukan koreksi stok opname saat di-upload lagi.
-  xlsxSetQtyColFormats(ws, [5,6], 1);
+  // (Kolom "Peruntukan" -- index 6 -- teks, bukan angka, jadi dilewati di sini.)
+  xlsxSetQtyColFormats(ws, [5,7], 1);
   xlStyleRow(ws, 0, COLS, xlHeaderStyle());
-  xlStyleBody(ws, 1, rows.length+1, COLS, [5,6]);
+  xlStyleBody(ws, 1, rows.length+1, COLS, [5,7]);
   const wb = XLSXStyle.utils.book_new();
   XLSXStyle.utils.book_append_sheet(wb, ws, 'Template Opname');
   XLSXStyle.writeFile(wb, 'Template_Opname_Semua_Lokasi_' + periodKey + '.xlsx');
@@ -6386,11 +6411,18 @@ async function exportReport3Pdf(){
 
 /* ---- Report 4: KPI Ideal Stock ---- */
 function report4Data(){
+  /* Net Sales di sini SENGAJA diambil dari session.netSales (Net Sales
+     Bulan Ini yang diisi & dikunci saat finalisasi periode di halaman
+     Stok Opname) -- BUKAN dari monthlyNetSalesFor (Net Sales Food +
+     Beverage di Laporan Food & Beverage Cost), karena angka F&B itu
+     cuma murni produk makanan/minuman, sedangkan bisnis ini juga punya
+     pendapatan sales dari non-food. KPI Ideal Stock butuh total Net
+     Sales keseluruhan supaya %Stok vs Sales-nya konsisten dengan yang
+     ada di halaman Stok Opname. */
   const sessions = state.opnameSessions.filter(s=>s.status==='selesai' && s.groupValues).sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
   return sessions.map(s=>{
-    const ns = monthlyNetSalesFor(s.periodKey);
-    const hasNs = !!(ns && (ns.netSalesFood || ns.netSalesBeverage));
-    const netSales = hasNs ? (Number(ns.netSalesFood||0) + Number(ns.netSalesBeverage||0)) : 0;
+    const hasNs = !!(s.netSales);
+    const netSales = hasNs ? Number(s.netSales||0) : 0;
     const totalStock = s.totalValue || s.groupValues.totalValueAllGroups || 0;
     const pct = hasNs ? (totalStock/netSales*100) : null;
     return { periodKey: s.periodKey, totalStock, netSales, hasNs, pct, groupValues: s.groupValues };
@@ -6421,7 +6453,7 @@ function reportOpnameR4Html(){
           </tbody>
         </table>
       </div>
-      <div class="lock-note">Hanya menampilkan bulan yang sudah punya snapshot Stok Opname yang difinalisasi — tidak ada bulan yang dikarang. Net Sales = total Net Sales Food + Beverage yang diisi manual di Laporan Food &amp; Beverage Cost. Persentase per divisi dihitung terhadap Net Sales total bulan itu (belum ada Net Sales per divisi).</div>
+      <div class="lock-note">Hanya menampilkan bulan yang sudah punya snapshot Stok Opname yang difinalisasi — tidak ada bulan yang dikarang. Net Sales = Net Sales Bulan Ini yang diisi &amp; dikunci saat finalisasi periode di halaman Stok Opname (total seluruh sales, bukan cuma Food &amp; Beverage). Persentase per divisi dihitung terhadap Net Sales total bulan itu (belum ada Net Sales per divisi).</div>
       `}
     </div>
   `;
@@ -6449,7 +6481,7 @@ async function exportReport4Excel(){
   const pctRows = [];
   REPORT_OPNAME_GROUPS.forEach(g=>{
     divRows.push(aoa.length);
-    aoa.push([divisionLabel(g.id), ...data.map(d=>(d.groupValues[g.id]&&d.groupValues[g.id].total)||0)]);
+    aoa.push([divisionLabel(g.id), ...data.map(d=>Math.round((d.groupValues[g.id]&&d.groupValues[g.id].total)||0))]);
     pctRows.push(aoa.length);
     aoa.push(['  % dari Sales', ...data.map(d=>{ const val=(d.groupValues[g.id]&&d.groupValues[g.id].total)||0; return d.hasNs ? Number((val/d.netSales*100).toFixed(2)) : ''; })]);
   });
@@ -6457,6 +6489,16 @@ async function exportReport4Excel(){
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:data.length}}, {s:{r:1,c:0}, e:{r:1,c:data.length}} ];
   ws['!cols'] = [{wch:22}, ...data.map(()=>({wch:16}))];
+  /* Laporan ini metriknya di BARIS dan periode (bulan) di KOLOM -- jadi
+     format angka diterapkan per baris (xlsxSetRowFormat), bukan per kolom
+     seperti laporan lain, karena satu kolom yang sama bisa berisi baris
+     Rupiah (Total Nilai Stok, Net Sales, nilai per divisi) maupun baris
+     persen (% Stock vs Sales, % dari Sales) berselang-seling. */
+  xlsxSetRowFormat(ws, headerRowIdx+1, 1, COLS, XLFMT_RP);  // Total Nilai Stok
+  xlsxSetRowFormat(ws, headerRowIdx+2, 1, COLS, XLFMT_RP);  // Net Sales
+  xlsxSetRowFormat(ws, headerRowIdx+3, 1, COLS, XLFMT_PCT); // % Stock vs Sales
+  divRows.forEach(r=>xlsxSetRowFormat(ws, r, 1, COLS, XLFMT_RP));
+  pctRows.forEach(r=>xlsxSetRowFormat(ws, r, 1, COLS, XLFMT_PCT));
   xlCell(ws, 0, 0).s = xlTitleStyle(14);
   xlCell(ws, 1, 0).s = xlTitleStyle(11);
   xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
@@ -6630,13 +6672,20 @@ function buildReport4SheetInto(wb){
   const pctRows = [];
   REPORT_OPNAME_GROUPS.forEach(g=>{
     divRows.push(aoa.length);
-    aoa.push([divisionLabel(g.id), ...data.map(d=>(d.groupValues[g.id]&&d.groupValues[g.id].total)||0)]);
+    aoa.push([divisionLabel(g.id), ...data.map(d=>Math.round((d.groupValues[g.id]&&d.groupValues[g.id].total)||0))]);
     pctRows.push(aoa.length);
     aoa.push(['  % dari Sales', ...data.map(d=>{ const val=(d.groupValues[g.id]&&d.groupValues[g.id].total)||0; return d.hasNs ? Number((val/d.netSales*100).toFixed(2)) : ''; })]);
   });
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:data.length}}, {s:{r:1,c:0}, e:{r:1,c:data.length}} ];
   ws['!cols'] = [{wch:22}, ...data.map(()=>({wch:16}))];
+  /* Sama seperti exportReport4Excel: metrik di baris, periode di kolom --
+     format angka per baris (lihat komentar di sana). */
+  xlsxSetRowFormat(ws, headerRowIdx+1, 1, COLS, XLFMT_RP);  // Total Nilai Stok
+  xlsxSetRowFormat(ws, headerRowIdx+2, 1, COLS, XLFMT_RP);  // Net Sales
+  xlsxSetRowFormat(ws, headerRowIdx+3, 1, COLS, XLFMT_PCT); // % Stock vs Sales
+  divRows.forEach(r=>xlsxSetRowFormat(ws, r, 1, COLS, XLFMT_RP));
+  pctRows.forEach(r=>xlsxSetRowFormat(ws, r, 1, COLS, XLFMT_PCT));
   xlCell(ws, 0, 0).s = xlTitleStyle(14);
   xlCell(ws, 1, 0).s = xlTitleStyle(11);
   xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
