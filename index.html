@@ -1616,6 +1616,41 @@ async function moveStockMulti(sourceBuckets, toWarehouseId, itemId){
   }
 }
 
+/** Reduces `itemId`'s stock at a Gudang Utama (`warehouseId`) location by
+ * `reduceQty`, drawing from whichever Peruntukan bucket(s) actually hold the
+ * stock right now -- proportional to each bucket's current share -- instead
+ * of always targeting 'mix'. A plain "sistem X -> fisik Y" shrinkage from
+ * Stok Opname has no way to know which divisi the missing stock belonged
+ * to, so it's spread across whatever buckets exist rather than assumed to
+ * live in 'mix'. Targeting 'mix' alone used to silently no-op (clamped at 0,
+ * since allowNegative only skips the insufficient-stock error, it doesn't
+ * conjure stock that isn't in that bucket) whenever the item's real stock
+ * sat in a different Peruntukan bucket (e.g. 'kitchen') -- the item's
+ * Inventory total never actually dropped even though the opname log said it
+ * did. This is the fix for that (Sept 2026 Inventory-vs-Opname gap).
+ * Falls back to a single 'mix' reduction if, unexpectedly, no bucket holds
+ * enough to explain it (keeps the old behavior rather than throwing). */
+async function applyStorageReduction(warehouseId, itemId, reduceQty){
+  reduceQty = Math.round(Math.abs(reduceQty) * 1000) / 1000;
+  if(reduceQty <= 0.0005) return;
+  const buckets = PERUNTUKAN_OPTIONS
+    .map(p=>({ id: p.id, qty: stockQtyByPeruntukan(warehouseId, itemId, p.id) }))
+    .filter(b=>b.qty > 0.0005);
+  const bucketTotal = Math.round(buckets.reduce((s,b)=>s+b.qty, 0) * 1000) / 1000;
+  if(bucketTotal <= 0.0005){
+    await adjustStock(warehouseId, itemId, -reduceQty, 'mix', {allowNegative:true});
+    return;
+  }
+  let remaining = Math.min(reduceQty, bucketTotal);
+  for(let i=0;i<buckets.length;i++){
+    const b = buckets[i];
+    const isLast = i === buckets.length - 1;
+    const share = isLast ? remaining : Math.min(b.qty, Math.round((reduceQty * (b.qty / bucketTotal)) * 1000) / 1000);
+    if(share > 0.0005) await adjustStock(warehouseId, itemId, -share, b.id, {allowNegative:true});
+    remaining = Math.round((remaining - share) * 1000) / 1000;
+  }
+}
+
 /* Suggests the next available item code. Real codes here are plain
    incrementing numbers ("1", "2", … "930", no prefix/padding) for regular
    items, and 3-digit K-/B- codes for WIP Kitchen / WIP Bar items
@@ -2487,8 +2522,17 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added, add
   }
   try{
     for(const line of changedLines){
-      const peruntukan = isStorageWarehouse(locationId) ? (line.peruntukan || 'mix') : null;
-      await adjustStock(locationId, line.item.id, line.delta, peruntukan, {allowNegative:true});
+      if(isStorageWarehouse(locationId) && line.delta < 0 && line.peruntukan == null){
+        // Plain recount shrinkage (not a 'goods' add with its own explicit
+        // Peruntukan): draw the reduction from whichever bucket(s) actually
+        // hold this item's stock -- see applyStorageReduction() -- instead
+        // of always hitting 'mix', which used to silently no-op whenever
+        // the real stock lived in a different bucket.
+        await applyStorageReduction(locationId, line.item.id, line.delta);
+      } else {
+        const peruntukan = isStorageWarehouse(locationId) ? (line.peruntukan || 'mix') : null;
+        await adjustStock(locationId, line.item.id, line.delta, peruntukan, {allowNegative:true});
+      }
       const note = line.addedType==='goods'
         ? 'Stok Opname ' + periodLabel(periodKey) + ' — barang tambahan ditemukan saat hitung fisik' + (line.peruntukan ? ' (Peruntukan: ' + peruntukanName(line.peruntukan) + ')' : '') + ': ' + line.detail
         : 'Stok Opname ' + periodLabel(periodKey) + ': sistem ' + fmtNum(line.system) + ' ' + line.item.uom + ' → ' + line.detail;
@@ -3579,6 +3623,11 @@ function renderStokOpname(){
             <input type="file" id="opnameImportAllInput" accept=".xlsx,.xls" style="display:none;" onchange="handleOpnameImportAllFile(this)">
           </div>
           ` : ''}
+          ${isMaster && periodKey===SEPT2026_OPNAME_FIX_PERIOD ? `
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-outline btn-sm" onclick="confirmFixSeptemberOpnameShrinkageBug()">${ICONS.wrench||''} Perbaiki Stok Opname September (Bug Kantong Peruntukan)</button>
+          </div>
+          ` : ''}
         </div>
         ${isPastPeriod ? `<div class="cell-sub" style="margin-top:8px;">Memilih periode selain bulan berjalan — berguna kalau opname dilakukan di awal bulan berikutnya tapi mau tetap dihitung untuk bulan sebelumnya.</div>` : ''}
         ${canOpname ? `<div class="cell-sub" style="margin-top:6px;">1 file mencakup semua lokasi — isi kolom Jumlah Fisik, lalu upload lagi di sini untuk memproses semuanya sekaligus.</div>` : ''}
@@ -4196,8 +4245,15 @@ async function saveOpnameCorrection(){
       const newCanonical = srHasSmallUnit(item) ? (opnameCorrectQty[it.itemId] / item.conversionQty) : opnameCorrectQty[it.itemId];
       const delta = Math.round((newCanonical - (it.physicalQty||0)) * 1000) / 1000;
       if(Math.abs(delta) < 0.0001) continue;
-      const peruntukan = isStorage ? 'mix' : null;
-      await adjustStock(locationId, it.itemId, delta, peruntukan, {allowNegative:true});
+      if(isStorage && delta < 0){
+        // Same fix as actionSubmitOpnameCount: draw a correction that
+        // lowers the count from whichever Peruntukan bucket(s) actually
+        // hold the stock, not always 'mix'.
+        await applyStorageReduction(locationId, it.itemId, delta);
+      } else {
+        const peruntukan = isStorage ? 'mix' : null;
+        await adjustStock(locationId, it.itemId, delta, peruntukan, {allowNegative:true});
+      }
       await logTx({
         type:'opname', status:'completed',
         itemId: it.itemId, itemName: it.itemName, uom: item.uom, qty: Math.abs(delta),
@@ -4251,6 +4307,82 @@ async function saveOpnameCorrection(){
   }catch(err){
     toast(err.message || 'Gagal menyimpan koreksi. Coba lagi.', true);
   }
+}
+
+/* One-time maintenance action for the Sept 2026 Inventory-vs-Opname gap
+   (see applyStorageReduction() above for the underlying bug). Re-reads the
+   September 2026 opname's own already-recorded results for the three Gudang
+   Utama locations and, for every plain-recount line that was supposed to
+   REDUCE stock (selisih < 0, not a 'goods'/'wip' add) but whose current
+   live stock still sits at that line's old systemQty -- i.e. the reduction
+   never actually landed anywhere -- re-applies it now via
+   applyStorageReduction() (bucket-aware this time). A line whose current
+   stock does NOT match the old systemQty is left untouched and reported
+   separately, since something else has since moved that item and forcing
+   it back down would be wrong. Master-only. Safe to re-run: an already-
+   corrected line's current stock no longer matches staleSystem, so it's
+   skipped, not re-applied. Entirely separate data (opnameDetails/stock) and
+   code path from Surat Request / Permintaan Barang -- running this does not
+   touch or block those. */
+const SEPT2026_OPNAME_FIX_PERIOD = '2026-09';
+const SEPT2026_OPNAME_FIX_LOCATIONS = ['gudang1','gudang2','cold_storage'];
+function confirmFixSeptemberOpnameShrinkageBug(){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa menjalankan ini.', true); return; }
+  openConfirm(
+    'Perbaiki Stok Opname September 2026',
+    'Ini memeriksa ulang hasil Stok Opname September 2026 di Dry/Cold/Freezer Storage, dan menurunkan stok barang yang seharusnya berkurang tapi belum ter-apply (akibat bug kantong Peruntukan) ke angka fisik yang sudah tercatat. Barang yang stoknya sudah berubah sejak saat itu akan dilewati, tidak ditimpa. Proses ini tidak berhubungan dan tidak mengganggu Surat Request / Permintaan Barang. Lanjutkan?',
+    ()=>actionFixSeptemberOpnameShrinkageBug(),
+    'Jalankan Perbaikan', false
+  );
+}
+async function actionFixSeptemberOpnameShrinkageBug(){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa menjalankan ini.', true); return; }
+  const periodKey = SEPT2026_OPNAME_FIX_PERIOD;
+  const fixed = [];
+  const skipped = [];
+  try{
+    for(const locationId of SEPT2026_OPNAME_FIX_LOCATIONS){
+      const ref = db.doc('opnameDetails/' + periodKey + '__' + locationId);
+      const snap = await ref.get();
+      if(!snap.exists) continue;
+      const detail = snap.data();
+      const items = detail.items || [];
+      for(const it of items){
+        if(it.addedType) continue;
+        if(!(it.selisih < -0.0005)) continue;
+        const item = itemById(it.itemId);
+        if(!item){ skipped.push({locationId, itemName: it.itemName, reason:'barang sudah tidak ada di Master Barang'}); continue; }
+        const current = stockQty(locationId, it.itemId);
+        const staleSystem = it.systemQty || 0;
+        if(Math.abs(current - staleSystem) > 0.01){
+          skipped.push({locationId, itemName: it.itemName, reason:'stok sudah berubah sejak opname (sistem saat ini ' + fmtNum(current) + ', dulu ' + fmtNum(staleSystem) + ')'});
+          continue;
+        }
+        await applyStorageReduction(locationId, it.itemId, it.selisih);
+        await logTx({
+          type:'opname', status:'completed',
+          itemId: it.itemId, itemName: it.itemName, uom: item.uom, qty: Math.abs(it.selisih),
+          fromWarehouseId: locationId, fromWarehouseName: whName(locationId),
+          note: 'Koreksi bug kantong Peruntukan — Stok Opname ' + periodLabel(periodKey) + ': sistem ' + fmtNum(staleSystem) + ' ' + item.uom + ' → fisik ' + fmtNum(it.physicalQty||0) + ' ' + item.uom + ' (baru diterapkan sekarang)',
+        });
+        fixed.push({ locationId, itemName: it.itemName, systemQty: staleSystem, physicalQty: it.physicalQty||0, valueDelta: Math.abs(it.selisih) * (it.price||0) });
+      }
+    }
+  }catch(err){
+    toast(err.message || 'Gagal menjalankan perbaikan. Coba lagi.', true);
+    return;
+  }
+  const totalValue = fixed.reduce((s,f)=>s+f.valueDelta,0);
+  const rows = fixed.map(f=>`<tr><td>${escapeHtml(whName(f.locationId))}</td><td>${escapeHtml(f.itemName)}</td><td style="text-align:right">${fmtNum(f.systemQty)}</td><td style="text-align:right">${fmtNum(f.physicalQty)}</td><td style="text-align:right">${fmtIDR(f.valueDelta)}</td></tr>`).join('');
+  const skipRows = skipped.map(s=>`<li>${escapeHtml(whName(s.locationId))} — ${escapeHtml(s.itemName)}: ${escapeHtml(s.reason)}</li>`).join('');
+  const body = `
+    <p style="font-size:13px; color:var(--text-secondary);">Selesai. <b>${fixed.length} barang</b> diperbaiki, total nilai turun <b>${fmtIDR(totalValue)}</b>.${skipped.length ? ' ' + skipped.length + ' barang dilewati (lihat di bawah).' : ''}</p>
+    ${fixed.length ? `<div style="max-height:260px; overflow:auto; border:1px solid var(--border); border-radius:8px;">
+      <table class="table" style="font-size:12px;"><thead><tr><th>Lokasi</th><th>Barang</th><th style="text-align:right">Sistem (lama)</th><th style="text-align:right">Fisik</th><th style="text-align:right">Nilai Dikoreksi</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>` : ''}
+    ${skipped.length ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:12px;">Dilewati:</p><ul style="font-size:12px; color:var(--text-secondary);">${skipRows}</ul>` : ''}
+  `;
+  openModal('Hasil Perbaikan Stok Opname September 2026', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
 }
 function openAddWipModal(){
   const locationId = state.opnameCountLocation;
