@@ -1051,6 +1051,11 @@ const state = {
   items: [],
   stock: [],
   transactions: [],
+  // Permintaan Barang (SR) dan Permintaan WIP masing-masing punya listener
+  // TERSENDIRI (lihat initDb) -- lihat definisinya untuk alasan kenapa ini
+  // tidak boleh cuma difilter dari `transactions` di atas.
+  srTransactions: [],
+  wipRequestTransactions: [],
   notifOpen: false,
   dashboardLocation: '',
   dashboardStockMode: 'value',
@@ -1200,7 +1205,7 @@ function isWipGatePending(w){ return !!w && w.status==='menunggu' && w.kitchenGa
 function wipStatusTag(w){ if(isWipGatePending(w)) return '<span class="tag tag-kitchen-gate">Menunggu Kitchen Leader</span>'; return statusTag(w.status); }
 function pendingWipCount(){
   const role = currentRole();
-  const docs = new Set(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
+  const docs = new Set(state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
   return docs.size;
 }
 
@@ -1485,6 +1490,31 @@ async function initDb(){
     _markLoaded('transactions');
   }, err=>{ toast('Gagal memuat log aktivitas.', true); _markLoaded('transactions'); });
 
+  // Permintaan Barang (SR, type 'request') and Permintaan WIP (type
+  // 'wiprequest') get their OWN listeners, deliberately separate from the
+  // general 'transactions' one above. That one keeps only the 500 MOST
+  // RECENT rows of every type combined (goods receiving, transfers,
+  // Stock Opname's own log lines, SR, WIP request, ...) -- fine for a
+  // "recent activity" report, but Stock Opname alone can log one row per
+  // item changed per location in a single night, easily hundreds of rows,
+  // which silently pushed older SR/WIP-request rows (including ones still
+  // "menunggu" approval) out of that 500-row window and made them
+  // disappear from every SR/WIP screen -- not deleted, just no longer
+  // loaded. SR and WIP request are pending-approval workflows people must
+  // be able to see reliably, so they query their own type directly instead
+  // of sharing that capped, all-types window.
+  db.collection('transactions').where('type','==','request').orderBy('createdAt','desc').limit(5000).onSnapshot(snap=>{
+    state.srTransactions = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    renderUnlessOpnameTyping();
+    _markLoaded('srTransactions');
+  }, err=>{ toast('Gagal memuat data Permintaan Barang.', true); _markLoaded('srTransactions'); });
+
+  db.collection('transactions').where('type','==','wiprequest').orderBy('createdAt','desc').limit(5000).onSnapshot(snap=>{
+    state.wipRequestTransactions = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    renderUnlessOpnameTyping();
+    _markLoaded('wipRequestTransactions');
+  }, err=>{ toast('Gagal memuat data Permintaan WIP.', true); _markLoaded('wipRequestTransactions'); });
+
   db.collection('suppliers').onSnapshot(snap=>{
     state.suppliers = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     renderUnlessOpnameTyping();
@@ -1630,16 +1660,30 @@ async function logTx(tx){
   await db.collection('transactions').add({ ...tx, role: state.role, roleName: currentRole().name, createdBy: currentUserName || null, createdAt: tx.createdAt || new Date().toISOString() });
 }
 
-function nextDocNumber(prefix){
-  const existing = state.transactions.filter(t=>(t.docNumber||'').indexOf(prefix+'-')===0);
+// Prefix -> the transaction 'type' it's stored under, so the next-number
+// scan below can query that type directly instead of relying on
+// state.transactions -- which only ever holds the 500 MOST RECENT
+// transactions of every type combined (see the 'transactions' onSnapshot
+// listener). A busy night easily logs 500+ transactions of OTHER types
+// (e.g. one row per item changed per location during Stock Opname alone),
+// which would silently push the true highest-numbered GR/TR/SR/WIP out of
+// that window -- scanning only what's left would then find a lower max
+// and hand out a docNumber that already exists elsewhere in the database,
+// a duplicate document number. Querying fresh and unlimited, scoped to
+// just this one type, always sees the true max regardless of how much
+// unrelated activity has happened.
+const DOC_PREFIX_TYPE = { GR:'in', TR:'transfer', SR:'request', WIP:'wiprequest' };
+async function nextDocNumber(prefix){
+  const type = DOC_PREFIX_TYPE[prefix];
+  const rows = type ? (await db.collection('transactions').where('type','==',type).get()).docs.map(d=>d.data()) : state.transactions;
   let max = 0;
-  existing.forEach(t=>{ const n = parseInt((t.docNumber||'').split('-')[1], 10); if(!isNaN(n) && n>max) max = n; });
+  rows.forEach(t=>{ if((t.docNumber||'').indexOf(prefix+'-')!==0) return; const n = parseInt((t.docNumber||'').split('-')[1], 10); if(!isNaN(n) && n>max) max = n; });
   return prefix + '-' + String(max+1).padStart(6,'0');
 }
 
 /* --- Penerimaan Barang (multi-item document) --- */
 async function actionReceivingDoc(payload){
-  const docNumber = nextDocNumber('GR');
+  const docNumber = await nextDocNumber('GR');
   for(const line of payload.lines){
     const item = await getOrCreateItem({name: line.itemName, category: line.category, uom: line.uom});
     const peruntukan = isStorageWarehouse(line.locationId) ? (line.peruntukan || 'mix') : null;
@@ -1756,7 +1800,7 @@ async function actionDeleteReceiving(docNumber){
 /* --- Transfer manual (Gudang Utama <-> Gudang Utama, tidak terkait Permintaan) --- */
 async function actionTransfer(payload){
   const item = itemById(payload.itemId);
-  const docNumber = nextDocNumber('TR');
+  const docNumber = await nextDocNumber('TR');
   const sourcePeruntukan = isStorageWarehouse(payload.fromWarehouseId) ? 'mix' : null;
   await moveStockMulti([{warehouseId: payload.fromWarehouseId, peruntukan: sourcePeruntukan, qty: payload.qty}], payload.toWarehouseId, payload.itemId);
   await logTx({
@@ -1771,7 +1815,7 @@ async function actionTransfer(payload){
 
 /* --- Permintaan Barang (multi-item document, tanpa memilih sumber di awal) --- */
 async function actionStoreRequestDoc(payload){
-  const docNumber = nextDocNumber('SR');
+  const docNumber = await nextDocNumber('SR');
   const division = divisionById(payload.divisionId);
   const toWarehouseId = division ? division.wh : payload.divisionId;
   const kitchenGateStatus = isKitchenDivision(payload.divisionId) ? 'pending' : null;
@@ -1792,7 +1836,7 @@ async function actionStoreRequestDoc(payload){
 async function actionApproveKitchenGate(docNumber){
   const role = currentRole();
   if(!canApproveKitchenGate(role)){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber && isKitchenGatePending(t));
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && isKitchenGatePending(t));
   if(lines.length===0){ toast('Permintaan ini tidak lagi menunggu Kitchen Leader.', true); return; }
   try{
     for(const line of lines){
@@ -1807,14 +1851,14 @@ function confirmApproveKitchenGate(docNumber){
   openConfirm('Setujui Permintaan', 'Setujui Permintaan ' + docNumber + ' dan teruskan ke Receiving untuk diproses?', async ()=>{ await actionApproveKitchenGate(docNumber); }, 'Setujui', false);
 }
 function confirmDeleteSr(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteSR(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
   openConfirm('Hapus Permintaan', `Hapus Permintaan ${docNumber}? Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteSr(docNumber), 'Hapus', true);
 }
 async function actionDeleteSr(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteSR(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
@@ -1827,7 +1871,7 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
      fields actually present are written, so editing one never wipes the
      other -- that's what kept Receiving from telling a Kitchen Leader's
      revision note apart from the original requester's note. */
-  const existingLines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const existingLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(existingLines.length===0) throw new Error('Permintaan tidak ditemukan.');
   if(existingLines[0].status!=='menunggu') throw new Error('Permintaan ini sudah diproses, tidak bisa diubah lagi.');
   const first = existingLines[0];
@@ -1864,7 +1908,7 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
 
 async function actionDecideRequestDoc(docNumber, decision, note){
   if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan Barang.', true); return; }
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(lines.length===0 || lines[0].status!=='menunggu') return;
   try{
     for(const line of lines){
@@ -1878,7 +1922,7 @@ async function actionDecideRequestDoc(docNumber, decision, note){
 
 async function actionApproveAndTransfer(docNumber, sourceLocationId){
   if(!canApproveSR(currentRole())){ throw new Error('Peran ini tidak dapat memproses Permintaan Barang.'); }
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
   if(lines.length===0) throw new Error('Tidak ada baris yang menunggu persetujuan.');
   const toWarehouseId = lines[0].toWarehouseId; // requesting division
   for(const line of lines){
@@ -1889,7 +1933,7 @@ async function actionApproveAndTransfer(docNumber, sourceLocationId){
       throw new Error('Stok ' + line.itemName + ' untuk ' + whName(toWarehouseId) + ' (termasuk Mix Use) tidak cukup di ' + whName(sourceLocationId) + '. Tersedia ' + fmtNum(combined) + ', dibutuhkan ' + fmtNum(line.qty) + '. Sisanya mungkin teralokasi untuk divisi lain.');
     }
   }
-  const trDocNumber = nextDocNumber('TR');
+  const trDocNumber = await nextDocNumber('TR');
   for(const line of lines){
     const divisionQty = stockQtyByPeruntukan(sourceLocationId, line.itemId, toWarehouseId);
     const fromDivision = Math.min(line.qty, divisionQty);
@@ -2107,7 +2151,15 @@ async function generateOpnamePdf(periodKey){
     doc.setTextColor(0);
 
     const totalValue = Object.values(session.locationValues||{}).reduce((s,v)=>s+v,0);
-    const totalUsed = Object.values(session.locationUsedValues||{}).reduce((s,v)=>s+v,0);
+    // Stored as (Nilai Sistem - Nilai Fisik) -- see actionSubmitOpnameCount --
+    // so a NEGATIVE stored value actually means the physical count came in
+    // HIGHER than the system expected (a surplus), not "negative usage".
+    // Flipped here (and everywhere else this is shown) to match the exact
+    // sign convention already used for the item-level "Selisih" column:
+    // positive = lebih/surplus, negative = berkurang/terpakai -- never
+    // reinterpreted or re-stored, purely a display-time sign flip, so old
+    // finalized periods (written before this fix) read correctly too.
+    const totalSelisih = -Object.values(session.locationUsedValues||{}).reduce((s,v)=>s+v,0);
     const netSales = session.netSales || 0;
     const pct = netSales ? (totalValue/netSales*100) : null;
 
@@ -2116,7 +2168,7 @@ async function generateOpnamePdf(periodKey){
     doc.setFont('helvetica','normal'); doc.setFontSize(9.5);
     [
       ['Total Nilai Stok', fmtIDR(totalValue)],
-      ['Total Nilai Terpakai', fmtIDR(totalUsed)],
+      ['Total Selisih Nilai', fmtIDR(totalSelisih)],
       ['Net Sales', netSales ? fmtIDR(netSales) : '\u2014'],
       ['% Stok terhadap Sales', pct!==null ? pct.toFixed(2).replace('.',',')+'%' : '\u2014'],
     ].forEach(row=>{
@@ -2131,15 +2183,15 @@ async function generateOpnamePdf(periodKey){
     const locRows = WAREHOUSES.map(w=>{
       const val = (session.locationValues||{})[w.id];
       if(val===undefined) return null;
-      const used = (session.locationUsedValues||{})[w.id] || 0;
+      const selisih = -((session.locationUsedValues||{})[w.id] || 0);
       const addedGoods = (session.locationAddedGoodsValues||{})[w.id] || 0;
       const addedWip = (session.locationAddedWipValues||{})[w.id] || 0;
       const kontribusi = totalValue ? (val/totalValue*100) : 0;
-      return [w.name, fmtIDR(val), fmtIDR(addedGoods), fmtIDR(addedWip), fmtIDR(used), kontribusi.toFixed(1)+'%'];
+      return [w.name, fmtIDR(val), fmtIDR(addedGoods), fmtIDR(addedWip), fmtIDR(selisih), kontribusi.toFixed(1)+'%'];
     }).filter(Boolean);
     doc.autoTable({
       startY: y+8, margin:{left:margin, right:margin},
-      head: [['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi']],
+      head: [['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Selisih Nilai','% Kontribusi']],
       body: locRows.length ? locRows : [['Belum ada lokasi yang selesai diopname','\u2014','\u2014','\u2014','\u2014','\u2014']],
       styles:{fontSize:9, cellPadding:5},
       headStyles:{fillColor:brand, textColor:255},
@@ -2218,7 +2270,11 @@ async function generateOpnameExcel(periodKey){
     }
 
     const totalValue = Object.values(session.locationValues||{}).reduce((s,v)=>s+v,0);
-    const totalUsed = Object.values(session.locationUsedValues||{}).reduce((s,v)=>s+v,0);
+    // Same sign flip as the PDF export above -- stored value is (Nilai
+    // Sistem - Nilai Fisik); displayed here as (Nilai Fisik - Nilai Sistem)
+    // so positive = lebih/surplus, negative = berkurang/terpakai, matching
+    // the item-level "Selisih" column's convention everywhere else.
+    const totalSelisih = -Object.values(session.locationUsedValues||{}).reduce((s,v)=>s+v,0);
     const netSales = session.netSales || 0;
     const pct = netSales ? (totalValue/netSales*100) : null;
 
@@ -2241,21 +2297,21 @@ async function generateOpnameExcel(periodKey){
     ];
     const rowExecLabel = summaryRows.length - 1;
     const rowTotalValue = summaryRows.length; summaryRows.push(['Total Nilai Stok', Math.round(totalValue)]);
-    const rowTotalUsed = summaryRows.length; summaryRows.push(['Total Nilai Terpakai', Math.round(totalUsed)]);
+    const rowTotalUsed = summaryRows.length; summaryRows.push(['Total Selisih Nilai', Math.round(totalSelisih)]);
     const rowNetSales = summaryRows.length; summaryRows.push(['Net Sales', netSales ? Math.round(netSales) : '']);
     const rowPct = summaryRows.length; summaryRows.push(['% Stok terhadap Sales', pct!==null ? Number(pct.toFixed(1)) : '']);
     summaryRows.push([]);
     const rowLocLabel = summaryRows.length; summaryRows.push(['Rincian per Lokasi']);
-    const rowLocHeader = summaryRows.length; summaryRows.push(['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Nilai Terpakai','% Kontribusi']);
+    const rowLocHeader = summaryRows.length; summaryRows.push(['Lokasi','Nilai Tercatat','Nilai Penambahan Barang','Nilai Penambahan WIP','Selisih Nilai','% Kontribusi']);
     const rowLocStart = summaryRows.length;
     const locRows = WAREHOUSES.map(w=>{
       const val = (session.locationValues||{})[w.id];
       if(val===undefined) return null;
-      const used = (session.locationUsedValues||{})[w.id] || 0;
+      const selisih = -((session.locationUsedValues||{})[w.id] || 0);
       const addedGoods = (session.locationAddedGoodsValues||{})[w.id] || 0;
       const addedWip = (session.locationAddedWipValues||{})[w.id] || 0;
       const kontribusi = totalValue ? (val/totalValue*100) : 0;
-      return [w.name, Math.round(val), Math.round(addedGoods), Math.round(addedWip), Math.round(used), Number(kontribusi.toFixed(1))];
+      return [w.name, Math.round(val), Math.round(addedGoods), Math.round(addedWip), Math.round(selisih), Number(kontribusi.toFixed(1))];
     }).filter(Boolean);
     if(locRows.length===0) summaryRows.push(['Belum ada lokasi yang selesai diopname','—','—','—','—','—']);
     else summaryRows.push(...locRows);
@@ -2541,7 +2597,7 @@ async function actionBulkAddItems(rows){
 ========================================================= */
 function pendingCount(){
   const role = currentRole();
-  const docs = new Set(state.transactions.filter(t=>t.type==='request' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
+  const docs = new Set(state.srTransactions.filter(t=>t.type==='request' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
   return docs.size;
 }
 
@@ -2962,7 +3018,7 @@ function renderDashboard(){
   const lowStockRows = getLowStockRows();
 
   const reqByDivision = {};
-  state.transactions.filter(t=>t.type==='request' && t.status==='menunggu').forEach(t=>{ const key = t.divisionName || t.toWarehouseName; reqByDivision[key] = reqByDivision[key] || new Set(); reqByDivision[key].add(t.docNumber); });
+  state.srTransactions.filter(t=>t.type==='request' && t.status==='menunggu').forEach(t=>{ const key = t.divisionName || t.toWarehouseName; reqByDivision[key] = reqByDivision[key] || new Set(); reqByDivision[key].add(t.docNumber); });
   const reqRows = Object.keys(reqByDivision).map(k=>({name:k, count:reqByDivision[k].size})).sort((a,b)=>b.count-a.count);
 
   const recentTypes = ['in','transfer','request','opname'];
@@ -3125,7 +3181,7 @@ function renderKitchenLeaderDashboard(){
   const role = currentRole();
   const myDivisionIds = role.divisionIds || [];
   const myWarehouses = allowedInventoryWarehouseIds(role) || []; // ['kitchen','staff_meal']
-  const pendingForMe = groupByDocNumber(state.transactions.filter(t=>t.type==='request' && isKitchenGatePending(t) && myDivisionIds.includes(t.divisionId)));
+  const pendingForMe = groupByDocNumber(state.srTransactions.filter(t=>t.type==='request' && isKitchenGatePending(t) && myDivisionIds.includes(t.divisionId)));
   const recentKitchen = state.transactions.filter(t=>{
     if(t.type==='request') return myDivisionIds.includes(t.divisionId);
     // 'in' (Barang Masuk) is included too -- Staff Meal has no login of its
@@ -3192,7 +3248,7 @@ function renderServiceLeaderDashboard(){
   const myDivisionIds = role.divisionIds || []; // ['service']
   const myWarehouseIds = allowedInventoryWarehouseIds(role) || []; // ['service','housekeeping','security','bar']
   const myWarehouses = WAREHOUSES.filter(w=>myWarehouseIds.includes(w.id));
-  const pendingForMe = groupByDocNumber(state.transactions.filter(t=>t.type==='request' && t.status==='menunggu' && myDivisionIds.includes(t.divisionId)));
+  const pendingForMe = groupByDocNumber(state.srTransactions.filter(t=>t.type==='request' && t.status==='menunggu' && myDivisionIds.includes(t.divisionId)));
   const locEntries = myWarehouses.map(w=>({name:w.name, val:locationValue(w), locId:w.id})).filter(e=>e.val>0).sort((a,b)=>b.val-a.val);
   const locTotal = locEntries.reduce((s,e)=>s+e.val,0);
   const inventoryValue = myWarehouses.reduce((s,w)=>s+locationValue(w),0);
@@ -3494,7 +3550,14 @@ function renderStokOpname(){
   const locationAddedWipValues = (session && session.locationAddedWipValues) || {};
   const allDone = WAREHOUSES.every(w=>locationsDone[w.id]);
   const totalValueSoFar = Object.values(locationValues).reduce((s,v)=>s+v,0);
-  const totalUsedSoFar = Object.values(locationUsedValues).reduce((s,v)=>s+v,0);
+  // Stored per-location as (Nilai Sistem - Nilai Fisik) -- see
+  // actionSubmitOpnameCount -- so negative means the physical count came in
+  // HIGHER than system expected (a surplus), not "negative usage". Flipped
+  // here to "Selisih Nilai" so the sign matches the item-level "Selisih"
+  // column everywhere else: positive = lebih/surplus, negative =
+  // berkurang/terpakai. Purely a display-time flip -- the stored value and
+  // its formula never change, so past finalized periods read correctly too.
+  const totalSelisihSoFar = -Object.values(locationUsedValues).reduce((s,v)=>s+v,0);
   const history = state.opnameSessions.filter(s=>s.status==='selesai').sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
   const isPastPeriod = periodKey !== currentPeriodKey();
 
@@ -3522,12 +3585,13 @@ function renderStokOpname(){
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Lokasi</th><th class="num">Nilai Tercatat</th><th class="num">Nilai Penambahan Barang</th><th class="num">Nilai Penambahan WIP</th><th class="num">Nilai Terpakai</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>Lokasi</th><th class="num">Nilai Tercatat</th><th class="num">Nilai Penambahan Barang</th><th class="num">Nilai Penambahan WIP</th><th class="num">Selisih Nilai</th><th>Status</th><th></th></tr></thead>
           <tbody>
             ${WAREHOUSES.map(w=>{
               const done = locationsDone[w.id];
-              const usedVal = locationUsedValues[w.id];
-              const usedColor = usedVal>0 ? 'var(--text)' : (usedVal<0 ? 'var(--success)' : 'var(--text-faint)');
+              // Flip to "Selisih Nilai" -- see totalSelisihSoFar above for why.
+              const selisihVal = locationUsedValues[w.id]!=null ? -locationUsedValues[w.id] : null;
+              const selisihColor = !selisihVal ? 'var(--text-faint)' : (selisihVal>0 ? 'var(--success)' : 'var(--danger)');
               const draft = !done ? findOpnameDraft(w.id, periodKey) : null;
               // Draft -> Checked ("Hampir Final") -> Selesai (locked). Checked
               // just means the counter has reviewed it as ready -- stock is
@@ -3572,7 +3636,7 @@ function renderStokOpname(){
                 <td class="num">${done ? fmtIDR(locationValues[w.id]) : '—'}</td>
                 <td class="num">${done ? fmtIDR(locationAddedGoodsValues[w.id]||0) : '—'}</td>
                 <td class="num">${done ? fmtIDR(locationAddedWipValues[w.id]||0) : '—'}</td>
-                <td class="num" style="color:${usedColor};">${done ? fmtIDR(usedVal||0) : '—'}</td>
+                <td class="num" style="color:${selisihColor};">${done ? fmtIDR(selisihVal||0) : '—'}</td>
                 <td>${statusTag}</td>
                 <td>${actionsHtml}</td>
               </tr>`;
@@ -3590,7 +3654,7 @@ function renderStokOpname(){
           <div class="field" style="margin:0;"><label>Total Nilai Stok (otomatis)</label><div class="cell-title" style="padding:8px 0;">${fmtIDR(totalValueSoFar)}</div></div>
           <div class="field" style="margin:0;"><label>Net Sales Bulan Ini</label><input type="text" inputmode="numeric" id="opnameNetSales" placeholder="0" value="${session && session.netSales?Number(session.netSales).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" ${session && session.status==='selesai'?'disabled':''}></div>
         </div>
-        <div class="cell-sub" style="margin-top:4px;">Total Nilai Terpakai periode ini: <b style="color:var(--text);">${fmtIDR(totalUsedSoFar)}</b></div>
+        <div class="cell-sub" style="margin-top:4px;">Total Selisih Nilai periode ini: <b style="color:${!totalSelisihSoFar ? 'var(--text)' : (totalSelisihSoFar>0 ? 'var(--success)' : 'var(--danger)')};">${fmtIDR(totalSelisihSoFar)}</b></div>
         ${session && session.status==='selesai' ?
           `<div class="lock-note" style="margin-top:12px;">Periode ini sudah difinalisasi pada ${fmtDate(session.finalizedAt)}. % Stok terhadap Sales: <b>${session.netSales ? (session.totalValue/session.netSales*100).toFixed(2).replace('.',',') : '—'}%</b></div>` :
           `<button class="btn btn-primary" style="margin-top:12px;" onclick="submitFinalizeOpname('${periodKey}')" ${!allDone?'disabled title="Selesaikan opname di semua lokasi dulu"':''}>Selesaikan Periode Ini</button>
@@ -4674,7 +4738,7 @@ function searchDateFilterHtml(opts){
 }
 function renderStoreRequests(){
   const role = currentRole();
-  const all = groupByDocNumber(state.transactions.filter(t=>t.type==='request')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  const all = groupByDocNumber(state.srTransactions.filter(t=>t.type==='request')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   const tabs = [{id:'menunggu', label:'Menunggu'},{id:'disetujui', label:'Disetujui'},{id:'ditolak', label:'Ditolak'},{id:'all', label:'Semua'}];
   let docs = state.srTab==='all' ? all : all.filter(d=>d.lines[0].status===state.srTab);
   if(state.srSearch){
@@ -4754,7 +4818,7 @@ function setWipDateTo(v){ state.wipDateTo = v; state.wipPage = 1; render(); }
 function resetWipFilters(){ state.wipSearch=''; state.wipDateFrom=''; state.wipDateTo=''; state.wipPage=1; render(); }
 function renderWipRequests(){
   const role = currentRole();
-  const all = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  const all = groupByDocNumber(state.wipRequestTransactions.filter(t=>t.type==='wiprequest')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   const tabs = [{id:'menunggu', label:'Menunggu'},{id:'disetujui', label:'Disetujui'},{id:'ditolak', label:'Ditolak'},{id:'all', label:'Semua'}];
   let docs = state.wipTab==='all' ? all : all.filter(d=>d.lines[0].status===state.wipTab);
   if(state.wipSearch){
@@ -4899,7 +4963,7 @@ function openTransferDetail(docNumber){
 }
 
 function openSrDetail(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   const first = lines[0];
@@ -4938,7 +5002,7 @@ function openSrDetail(docNumber){
   openModal('Permintaan ' + docNumber, body, foot);
 }
 function openEditSrModal(docNumber){
-  const existingLines = state.transactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const existingLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
   if(existingLines.length===0) return;
   const first = existingLines[0];
   const role = currentRole();
@@ -4994,7 +5058,7 @@ async function submitEditSr(docNumber, isLeaderEdit){
 }
 
 function openWipDetail(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   const first = lines[0];
@@ -7527,7 +7591,7 @@ function setReportWipPage(p){ state.reportWipPage = p; render(); }
 function resetReportWipFilters(){ state.reportWipSearch=''; state.reportWipDateFrom=''; state.reportWipDateTo=''; state.reportWipPage=1; render(); }
 function renderReportWip(){
   const role = currentRole();
-  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  let docs = groupByDocNumber(state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   if(state.reportWipSearch){
     const q = state.reportWipSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q));
@@ -7614,7 +7678,7 @@ function renderReportWip(){
 }
 function reportWipFilteredData(){
   const role = currentRole();
-  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
+  let docs = groupByDocNumber(state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.status==='disetujui')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   if(state.reportWipSearch){
     const q = state.reportWipSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q));
@@ -8571,7 +8635,7 @@ async function submitWipRequestDoc(){
   await submitGuarded(err, async ()=>{ await actionWipRequestDoc({divisionId, lines, note}); });
 }
 async function actionWipRequestDoc(payload){
-  const docNumber = nextDocNumber('WIP');
+  const docNumber = await nextDocNumber('WIP');
   const division = divisionById(payload.divisionId);
   for(const line of payload.lines){
     const item = itemById(line.itemId);
@@ -8590,7 +8654,7 @@ async function actionWipRequestDoc(payload){
 async function actionApproveWipGate(docNumber){
   const role = currentRole();
   if(!canApproveKitchenGate(role)){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && isWipGatePending(t));
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && isWipGatePending(t));
   if(lines.length===0){ toast('Permintaan ini tidak lagi menunggu Kitchen Leader.', true); return; }
   try{
     for(const line of lines){
@@ -8611,7 +8675,7 @@ function confirmApproveWipGate(docNumber){
    and never creates a Transfer (TR) document -- there is nothing to move. */
 async function actionApproveWip(docNumber){
   if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && t.status==='menunggu');
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && t.status==='menunggu');
   if(lines.length===0){ toast('Tidak ada baris yang menunggu persetujuan.', true); return; }
   try{
     for(const line of lines){
@@ -8628,7 +8692,7 @@ function confirmApproveWip(docNumber){
 }
 function openRejectWipModal(docNumber){
   const role = currentRole();
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   const first = lines[0];
   const canGate = first && isWipGatePending(first) && canApproveKitchenGate(role);
   const canFinal = first && !isWipGatePending(first) && canApproveSR(role);
@@ -8648,7 +8712,7 @@ async function submitRejectWip(docNumber){
 async function actionDecideWipRequestDoc(docNumber, decision, note){
   const role = currentRole();
   if(!canApproveKitchenGate(role) && !canApproveSR(role)){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   if(lines.length===0 || lines[0].status!=='menunggu') return;
   try{
     for(const line of lines){
@@ -8660,14 +8724,14 @@ async function actionDecideWipRequestDoc(docNumber, decision, note){
   }
 }
 function confirmDeleteWip(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteWip(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
   openConfirm('Hapus Permintaan WIP', `Hapus Permintaan WIP ${docNumber}? Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteWip(docNumber), 'Hapus', true);
 }
 async function actionDeleteWip(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteWip(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
