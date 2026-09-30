@@ -884,6 +884,17 @@ const PERUNTUKAN_OPTIONS = [
 ];
 function isStorageWarehouse(warehouseId){ return STORAGE_WAREHOUSES.some(w=>w.id===warehouseId); }
 function peruntukanName(id){ const p = PERUNTUKAN_OPTIONS.find(x=>x.id===id); return p ? p.name : 'Mix Use'; }
+// Reverse of peruntukanName() -- matches free-typed text (e.g. a Stok Opname
+// Excel import cell) against a PERUNTUKAN_OPTIONS name, case/whitespace
+// insensitive. Returns null (not a silent 'mix' fallback) when nothing
+// matches, so the caller can tell "typed something invalid" apart from "typed
+// nothing" -- both need the counter's attention, not a quiet default.
+function matchPeruntukanName(text){
+  const t = String(text||'').trim().toLowerCase();
+  if(!t) return null;
+  const found = PERUNTUKAN_OPTIONS.find(p=>p.name.toLowerCase()===t);
+  return found ? found.id : null;
+}
 
 /* Divisi -- WHO is requesting, tracked separately from WAREHOUSES (WHERE stock
    physically lives). Several divisions can share one physical warehouse: all
@@ -1393,6 +1404,24 @@ function revealAppAfterLoading(){
     document.getElementById('appRoot').style.display = 'flex';
   }, wait);
 }
+// Every Firestore onSnapshot listener below fires for EVERY connected
+// device, not just this one -- during Stock Opname, other staff are
+// commonly doing Penerimaan Barang, other locations' counts, or other
+// transactions at the very same time, each of which writes to 'items',
+// 'stock', 'transactions', etc. and would otherwise fire render() here on
+// every counter's screen. A full render() rebuilds the whole page's DOM,
+// which drops focus out of (and can appear to "freeze") whichever
+// "Jumlah Fisik"/"Koreksi" input the counter happens to be mid-typing in
+// on the Stock Opname counting/correction page at that exact moment --
+// this is what the counting/correction pages' own inputs update the DOM
+// cell-by-cell for (see opnameUpdateCount/opnameCorrectUpdateQty) instead
+// of going through render(). Those two pages only ever read their data
+// once, when opened, so skipping the reactive re-render while either is
+// open is safe -- whatever changed elsewhere is picked up the moment the
+// counter leaves the page (or any of their own actions triggers a render).
+function renderUnlessOpnameTyping(){
+  if(state.view !== 'opname-count' && state.view !== 'opname-correct') render();
+}
 /* Connects to the DB and starts listening to 'users' immediately at page
    load -- before login -- so accounts Master added or repasswordded from
    Setting can log in right away, not only after some other account has
@@ -1412,7 +1441,7 @@ function initAuthUsers(){
         const savedAccount = findAccountByUsername(savedUsername);
         if(savedAccount){ authedUsername = savedAccount.username; state.role = savedAccount.roleId; state.view = 'dashboard'; showApp(); }
       } else {
-        render();
+        renderUnlessOpnameTyping();
       }
     }, err=>{});
   }).catch(()=>{ db = null; });
@@ -1440,45 +1469,40 @@ async function initDb(){
     rebuildItemIndex();
     const liveIds = new Set(state.items.map(i=>i.id));
     [...state.itemsSelected].forEach(id=>{ if(!liveIds.has(id)) state.itemsSelected.delete(id); });
-    render();
+    renderUnlessOpnameTyping();
     _markLoaded('items');
   }, err=>{ toast('Gagal memuat data barang.', true); _markLoaded('items'); });
 
   db.collection('stock').onSnapshot(snap=>{
     state.stock = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    rebuildStockIndex(); render();
+    rebuildStockIndex(); renderUnlessOpnameTyping();
     _markLoaded('stock');
   }, err=>{ toast('Gagal memuat data stok.', true); _markLoaded('stock'); });
 
   db.collection('transactions').orderBy('createdAt','desc').limit(500).onSnapshot(snap=>{
     state.transactions = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
+    renderUnlessOpnameTyping();
     _markLoaded('transactions');
   }, err=>{ toast('Gagal memuat log aktivitas.', true); _markLoaded('transactions'); });
 
   db.collection('suppliers').onSnapshot(snap=>{
     state.suppliers = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-    render();
+    renderUnlessOpnameTyping();
   }, err=>{ /* suppliers collection may not exist yet; ignore */ });
 
   db.collection('opnameSessions').onSnapshot(snap=>{
     state.opnameSessions = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
+    renderUnlessOpnameTyping();
   }, err=>{ /* opname collection may not exist yet; ignore */ });
 
   db.collection('opnameDrafts').onSnapshot(snap=>{
     state.opnameDrafts = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    // Skip the reactive re-render while the counting page itself is open --
-    // that page reads a draft only once, at openOpnameCounting() time, and a
-    // full render() here would otherwise fire on every one of our own
-    // debounced autosaves echoing back and silently drop focus out of
-    // whichever "Jumlah Fisik" input the counter is mid-typing in.
-    if(state.view !== 'opname-count') render();
+    renderUnlessOpnameTyping();
   }, err=>{ /* opnameDrafts collection may not exist yet; ignore */ });
 
   db.collection('monthlyNetSales').onSnapshot(snap=>{
     state.monthlyNetSales = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
+    renderUnlessOpnameTyping();
   }, err=>{ /* monthlyNetSales collection may not exist yet; ignore */ });
 
   render();
@@ -4429,6 +4453,8 @@ function handleOpnameImportAllFile(inputEl){
 
       const locationIdsSeen = new Set();
       const unmatchedRows = [];
+      const wipMismatchRows = [];
+      const missingPeruntukanRows = [];
       const parsedRows = [];
       rows.forEach(row=>{
         const lokasiName = String(row['Lokasi']||'').trim();
@@ -4441,11 +4467,57 @@ function handleOpnameImportAllFile(inputEl){
         let item = kode ? findItemByKode(kode) : null;
         if(!item && namaBarang) item = state.items.find(i=>(i.name||'').toLowerCase()===namaBarang.toLowerCase());
         if(!item){ unmatchedRows.push(lokasiName + ' / ' + (namaBarang||kode||'?')); return; }
+        // A WIP-category item ('WIP Kitchen'/'WIP Bar') genuinely new to this
+        // location (never had real stock here) can only be a data-entry
+        // mistake -- WIP is never real warehouse stock anywhere except its
+        // own Kitchen/Bar (see wipCategoryFor), so a brand-new WIP row typed
+        // into any other location's sheet is rejected outright here, same
+        // spirit as "Tambah Barang" excluding WIP items from its picker
+        // entirely. An existing tracked row for the same item (system > 0,
+        // e.g. from before that picker fix) is left alone -- this only
+        // blocks NEW rows from sneaking in.
+        const isWipCategory = item.category==='WIP Kitchen' || item.category==='WIP Bar';
+        if(isWipCategory && wipCategoryFor(w.id)!==item.category && stockQty(w.id, item.id)<=0){
+          wipMismatchRows.push(lokasiName + ' / ' + item.name);
+          return;
+        }
+        // A genuinely new (system = 0), non-WIP item at a Gudang Utama
+        // location is exactly a "Tambah Barang" find -- and just like that
+        // button's Peruntukan selector, the counter almost always already
+        // knows which divisi it belongs to right there on the floor (a found
+        // carrot is obviously Kitchen's). So this is a required decision, not
+        // something to quietly default to Mix Use: the "Peruntukan" column
+        // (normally just an info display of an existing item's current
+        // breakdown -- see exportOpnameTemplateAll) doubles as the input for
+        // this one case, and a blank or unrecognized value here rejects the
+        // row rather than silently picking Mix Use for it. The `isNewAtStorage`
+        // condition is false for any row with existing tracked stock (system
+        // > 0), so that row's Peruntukan column is never read as input --
+        // it stays purely informational, exactly as before.
+        const isNewAtStorage = !isWipCategory && isStorageWarehouse(w.id) && stockQty(w.id, item.id) <= 0;
+        let peruntukanId = null;
+        if(isNewAtStorage){
+          peruntukanId = matchPeruntukanName(row['Peruntukan']);
+          if(!peruntukanId){
+            missingPeruntukanRows.push(lokasiName + ' / ' + item.name);
+            return;
+          }
+        }
         locationIdsSeen.add(w.id);
-        parsedRows.push({ locationId: w.id, itemId: item.id, qty: parseFloat(fisikRaw) || 0 });
+        parsedRows.push({ locationId: w.id, itemId: item.id, qty: parseFloat(fisikRaw) || 0, isNewAtStorage, peruntukanId });
       });
 
-      if(locationIdsSeen.size === 0){ hideLoading(); toast('Tidak ada baris yang cocok di file ini.', true); inputEl.value=''; return; }
+      if(locationIdsSeen.size === 0){
+        hideLoading();
+        toast(wipMismatchRows.length || missingPeruntukanRows.length
+          ? [
+              wipMismatchRows.length ? wipMismatchRows.length + ' baris WIP di lokasi yang salah' : null,
+              missingPeruntukanRows.length ? missingPeruntukanRows.length + ' baris barang baru belum diisi Peruntukan' : null,
+            ].filter(Boolean).join(', ') + ' -- tidak ada yang diproses.'
+          : 'Tidak ada baris yang cocok di file ini.', true);
+        inputEl.value='';
+        return;
+      }
 
       // Pre-seed each location with its full current item set (safety net if some rows were removed from the file), then overlay uploaded values.
       const byLocation = {};
@@ -4465,35 +4537,50 @@ function handleOpnameImportAllFile(inputEl){
       // all, actionSubmitOpnameCount would treat them as an ordinary
       // system=0 item and let WIP quietly become real trackable stock,
       // which is exactly what WIP items must never do (see
-      // actionSubmitOpnameCount). A row for a genuinely new non-WIP item
-      // (system=0 too) is left untagged on purpose -- that one SHOULD become
-      // real stock, same as "Tambah Barang" in the counting page.
+      // actionSubmitOpnameCount). A row for a genuinely new non-WIP item at a
+      // Gudang Utama location is tagged 'goods' with its parsed Peruntukan
+      // (see isNewAtStorage above) -- same as "Tambah Barang" would record.
+      // A genuinely new non-WIP item at a non-storage location is left
+      // untagged on purpose -- Peruntukan doesn't apply there, and it SHOULD
+      // still become real stock, same as "Tambah Barang" in the counting page.
       const addedByLocation = {};
-      locationIdsSeen.forEach(locId=>{ addedByLocation[locId] = {}; });
+      const addedPeruntukanByLocation = {};
+      locationIdsSeen.forEach(locId=>{ addedByLocation[locId] = {}; addedPeruntukanByLocation[locId] = {}; });
       parsedRows.forEach(r=>{
         const item = itemById(r.itemId);
         const wipCategory = wipCategoryFor(r.locationId);
         if(item && wipCategory && item.category===wipCategory && stockQty(r.locationId, r.itemId) <= 0){
           addedByLocation[r.locationId][r.itemId] = 'wip';
+        } else if(r.isNewAtStorage){
+          addedByLocation[r.locationId][r.itemId] = 'goods';
+          addedPeruntukanByLocation[r.locationId][r.itemId] = r.peruntukanId;
         }
       });
 
       hideLoading();
       inputEl.value = '';
       const locationNames = [...locationIdsSeen].map(id=>whName(id)).join(', ');
+      const skippedNoteParts = [];
+      if(wipMismatchRows.length) skippedNoteParts.push(wipMismatchRows.length + ' baris barang WIP di lokasi yang salah');
+      if(missingPeruntukanRows.length) skippedNoteParts.push(missingPeruntukanRows.length + ' baris barang baru yang belum diisi Peruntukan');
+      const skippedNote = skippedNoteParts.length ? ' ' + skippedNoteParts.join(' dan ') + ' akan diabaikan (tidak diproses).' : '';
       openConfirm(
         'Proses Import Opname',
-        'File ini mencakup ' + locationIdsSeen.size + ' lokasi (' + locationNames + '). Stok di lokasi-lokasi tersebut akan langsung dikoreksi sesuai isi file. Lanjutkan?',
+        'File ini mencakup ' + locationIdsSeen.size + ' lokasi (' + locationNames + '). Stok di lokasi-lokasi tersebut akan langsung dikoreksi sesuai isi file.' + skippedNote + ' Lanjutkan?',
         async ()=>{
           showLoading('Memproses opname dari Excel…');
           const periodKey = state.opnamePeriod || currentPeriodKey();
           let locationsProcessed = 0;
           for(const locationId of locationIdsSeen){
-            const ok = await actionSubmitOpnameCount(locationId, byLocation[locationId], periodKey, addedByLocation[locationId]);
+            const ok = await actionSubmitOpnameCount(locationId, byLocation[locationId], periodKey, addedByLocation[locationId], addedPeruntukanByLocation[locationId]);
             if(ok) locationsProcessed++;
           }
           hideLoading();
-          toast('Import selesai: ' + locationsProcessed + ' lokasi diproses' + (unmatchedRows.length ? ', ' + unmatchedRows.length + ' baris tidak cocok.' : '.'));
+          const skippedParts = [];
+          if(unmatchedRows.length) skippedParts.push(unmatchedRows.length + ' baris tidak cocok');
+          if(wipMismatchRows.length) skippedParts.push(wipMismatchRows.length + ' baris WIP di lokasi yang salah');
+          if(missingPeruntukanRows.length) skippedParts.push(missingPeruntukanRows.length + ' baris barang baru belum diisi Peruntukan');
+          toast('Import selesai: ' + locationsProcessed + ' lokasi diproses' + (skippedParts.length ? ', ' + skippedParts.join(', ') + ' (dilewati).' : '.'));
         },
         'Proses',
         false
