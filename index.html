@@ -2309,8 +2309,10 @@ async function generateOpnameExcel(periodKey){
     hideLoading();
   }
 }
-async function actionSubmitOpnameCount(locationId, counts, periodKey, added){
+async function actionSubmitOpnameCount(locationId, counts, periodKey, added, addedPeruntukan, addedPrice){
   added = added || {};
+  addedPeruntukan = addedPeruntukan || {};
+  addedPrice = addedPrice || {};
   let totalValue = 0;
   let systemTotalValue = 0;
   let addedGoodsValue = 0, addedWipValue = 0;
@@ -2322,25 +2324,31 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added){
     const useSmall = srHasSmallUnit(item);
     const enteredQty = counts[itemId] || 0;
     const physical = useSmall ? (enteredQty / item.conversionQty) : enteredQty;
-    const value = physical * (item.lastPrice||0);
     const addedType = added[itemId] || null;
-    if(addedType){
-      /* Manually-added item found during physical counting (via "Tambah
-         Barang" / "Tambah Barang WIP"): recorded only in allItemsDetail and
-         the location's added-value totals below. It intentionally never
-         calls adjustStock/logTx, so it can never move real inventory --
-         it only ever shows up inside the Stock Opname data itself. */
-      if(addedType==='wip') addedWipValue += value; else addedGoodsValue += value;
-      allItemsDetail.push({
-        itemId, itemName: item.name, kode: item.kode||'', uom: item.uom||'',
-        systemQty: 0, physicalQty: physical, selisih: physical,
-        price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: 0,
-        addedType,
-      });
-      return;
-    }
+    // A manually-entered total (from the "Harga Total" field on "Tambah
+    // Barang"/"Tambah Barang WIP") overrides the item master's lastPrice*qty
+    // default -- see opnameAddedPrice's declaration for why. !=null (not a
+    // truthy check) so an intentionally-entered 0 (e.g. a genuinely free
+    // find) is respected rather than falling back to lastPrice.
+    const priceOverride = (addedType && addedPrice[itemId]!=null) ? addedPrice[itemId] : null;
+    const value = priceOverride!=null ? priceOverride : physical * (item.lastPrice||0);
+    /* Manually-added item found during physical counting (via "Tambah
+       Barang" / "Tambah Barang WIP"). 'goods' items never had a system qty
+       at this location (system=0 below), so they flow through exactly like
+       a normal recount delta -- changedLines below, then adjustStock/logTx
+       further down -- and their counted quantity becomes real stock, the
+       basis for tomorrow's count. It's the only way stock enters without a
+       Penerimaan Barang document, so it never touches Penerimaan Barang's
+       own totals. 'wip' items still never touch real stock (WIP never
+       arrives via Penerimaan Barang either) -- see the early return below.
+       Both types' value is folded into totalValue (Nilai Tercatat) same as
+       any other counted item, since it's real closing-stock value either
+       way; addedGoodsValue/addedWipValue just keep a separate breakdown of
+       how much of that total came in through this route this period. */
+    const system = addedType ? 0 : stockQty(locationId, itemId);
+    if(addedType==='wip') addedWipValue += value;
+    else if(addedType==='goods') addedGoodsValue += value;
     totalValue += value;
-    const system = stockQty(locationId, itemId);
     systemTotalValue += system * (item.lastPrice||0);
     const delta = Math.round((physical - system) * 1000) / 1000;
     /* For a Gudang Utama location, keep a per-item breakdown of how much of
@@ -2348,24 +2356,32 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added){
        needed so Laporan Stock Opname can later show, at this exact moment in
        time, which divisi an allocated item belonged to. The physical-count
        delta itself (the difference vs system) always lands in Mix Use, same
-       as adjustStock() below always applies it with peruntukan 'mix'. */
+       as adjustStock() below always applies it with peruntukan 'mix' --
+       EXCEPT a 'goods' item added with an explicit Peruntukan choice on
+       "Tambah Barang" (see opnameAddedPeruntukan), which lands in that
+       divisi's own bucket instead, since the counter told us exactly whose
+       it is. */
+    const targetPeruntukan = (addedType==='goods' && addedPeruntukan[itemId]) ? addedPeruntukan[itemId] : 'mix';
     let peruntukanQty = null;
     if(isStorageWarehouse(locationId)){
       peruntukanQty = {};
       PERUNTUKAN_OPTIONS.forEach(p=>{ peruntukanQty[p.id] = stockQtyByPeruntukan(locationId, itemId, p.id); });
-      peruntukanQty.mix = (peruntukanQty.mix||0) + delta;
+      peruntukanQty[targetPeruntukan] = (peruntukanQty[targetPeruntukan]||0) + delta;
     }
     allItemsDetail.push({
       itemId, itemName: item.name, kode: item.kode||'', uom: item.uom||'',
       systemQty: system, physicalQty: physical, selisih: delta,
-      price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: delta*(item.lastPrice||0),
+      price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: addedType ? value : delta*(item.lastPrice||0),
+      ...(addedType ? {addedType} : {}),
+      ...(addedType==='goods' && isStorageWarehouse(locationId) ? {addedPeruntukan: targetPeruntukan} : {}),
       ...(peruntukanQty ? {peruntukanQty} : {}),
     });
+    if(addedType==='wip') return; // WIP value is counted above but never touches real stock
     if(Math.abs(delta) > 0.0001){
       const detail = useSmall
         ? ('fisik ' + fmtNum(enteredQty) + ' ' + item.smallUnit + ' (≈ ' + fmtNum(physical) + ' ' + item.uom + ')')
         : ('fisik ' + fmtNum(physical) + ' ' + item.uom);
-      changedLines.push({item, system, physical, delta, detail});
+      changedLines.push({item, system, physical, delta, detail, addedType, peruntukan: addedType==='goods' ? targetPeruntukan : null});
     }
   });
   const usedValue = systemTotalValue - totalValue;
@@ -2378,19 +2394,30 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added){
     PERUNTUKAN_OPTIONS.forEach(p=>{ peruntukanValues[p.id] = 0; });
     allItemsDetail.forEach(it=>{
       if(!it.peruntukanQty) return;
+      if(it.addedType==='goods'){
+        // A 'goods' add always has its whole (possibly Harga Total-
+        // overridden) value in exactly one bucket -- attribute nilaiFisik
+        // there directly instead of qty*catalog price, which would silently
+        // ignore an override.
+        peruntukanValues[it.addedPeruntukan||'mix'] += (it.nilaiFisik||0);
+        return;
+      }
       PERUNTUKAN_OPTIONS.forEach(p=>{ peruntukanValues[p.id] += (it.peruntukanQty[p.id]||0) * (it.price||0); });
     });
   }
   try{
     for(const line of changedLines){
-      const peruntukan = isStorageWarehouse(locationId) ? 'mix' : null;
+      const peruntukan = isStorageWarehouse(locationId) ? (line.peruntukan || 'mix') : null;
       await adjustStock(locationId, line.item.id, line.delta, peruntukan, {allowNegative:true});
+      const note = line.addedType==='goods'
+        ? 'Stok Opname ' + periodLabel(periodKey) + ' — barang tambahan ditemukan saat hitung fisik' + (line.peruntukan ? ' (Peruntukan: ' + peruntukanName(line.peruntukan) + ')' : '') + ': ' + line.detail
+        : 'Stok Opname ' + periodLabel(periodKey) + ': sistem ' + fmtNum(line.system) + ' ' + line.item.uom + ' → ' + line.detail;
       await logTx({
         type:'opname', status:'completed',
         itemId: line.item.id, itemName: line.item.name, uom: line.item.uom, qty: Math.abs(line.delta),
         toWarehouseId: line.delta>0 ? locationId : null, toWarehouseName: line.delta>0 ? whName(locationId) : null,
         fromWarehouseId: line.delta<0 ? locationId : null, fromWarehouseName: line.delta<0 ? whName(locationId) : null,
-        note: 'Stok Opname ' + periodLabel(periodKey) + ': sistem ' + fmtNum(line.system) + ' ' + line.item.uom + ' → ' + line.detail,
+        note,
       });
     }
     const ref = db.doc('opnameSessions/' + periodKey);
@@ -3603,10 +3630,30 @@ function renderOpnameChartBlock(history){
 let opnameCounts = {};
 // Maps itemId -> 'goods' | 'wip' for items added manually during this
 // counting session (via "Tambah Barang" / "Tambah Barang WIP") rather than
-// auto-populated from existing system stock. These are recorded only in the
-// opname data (allItemsDetail / locationAddedGoodsValues / locationAddedWipValues)
-// and never go through adjustStock, so they can never touch real inventory.
+// auto-populated from existing system stock. 'goods' items now DO go through
+// adjustStock in actionSubmitOpnameCount -- once this location's opname is
+// submitted/locked, their counted quantity becomes real stock and the basis
+// for tomorrow's system count, the only way stock enters without a
+// Penerimaan Barang document. 'wip' items still never touch real stock
+// (WIP never arrives via Penerimaan Barang), but both types' value is
+// folded into this location's Nilai Tercatat (see actionSubmitOpnameCount),
+// on top of the separate locationAddedGoodsValues/locationAddedWipValues
+// breakdown kept purely for reporting visibility.
 let opnameAdded = {};
+// Maps itemId -> peruntukan id chosen at add-time for a 'goods' item added
+// via "Tambah Barang" at a Gudang Utama-type (storage) location -- lets the
+// counter say which divisi this specific find belongs to, instead of it
+// always landing in Mix Use like an ordinary unexplained recount
+// difference (see actionSubmitOpnameCount). Not applicable/ignored outside
+// a storage location, since there the location itself already is the
+// divisi's own warehouse.
+let opnameAddedPeruntukan = {};
+// Maps itemId -> a manually-entered total Rupiah value for an item added
+// via "Tambah Barang"/"Tambah Barang WIP", overriding the item master's
+// lastPrice*qty default in actionSubmitOpnameCount -- since a manual find
+// never went through Penerimaan Barang, lastPrice may not reflect what
+// this specific addition is actually worth.
+let opnameAddedPrice = {};
 // Tracks which items the counter has actually typed a physical count for.
 // opnameCounts still defaults every item to its system quantity right away
 // (so the diff/total math and the final submit always have a real number to
@@ -3642,6 +3689,7 @@ async function saveOpnameDraftNow(silent){
     await db.doc('opnameDrafts/' + opnameDraftDocId(locationId, periodKey)).set({
       locationId, periodKey,
       counts: {...opnameCounts}, touched: {...opnameTouched}, added: {...opnameAdded},
+      addedPeruntukan: {...opnameAddedPeruntukan}, addedPrice: {...opnameAddedPrice},
       checked: false, checkedAt: null,
       updatedAt: nowIso,
     });
@@ -3685,7 +3733,7 @@ function confirmLockOpname(locationId, periodKey){
 async function lockOpnameLocation(locationId, periodKey){
   const draft = findOpnameDraft(locationId, periodKey);
   if(!draft){ toast('Draft opname tidak ditemukan.', true); return; }
-  const ok = await actionSubmitOpnameCount(locationId, {...draft.counts}, periodKey, {...(draft.added||{})});
+  const ok = await actionSubmitOpnameCount(locationId, {...draft.counts}, periodKey, {...(draft.added||{})}, {...(draft.addedPeruntukan||{})}, {...(draft.addedPrice||{})});
   if(ok) await deleteOpnameDraft(locationId, periodKey);
 }
 // Flushes any not-yet-saved edit (the debounce is still pending) before
@@ -3707,6 +3755,8 @@ function openOpnameCounting(locationId){
   opnameCounts = {};
   opnameAdded = {};
   opnameTouched = {};
+  opnameAddedPeruntukan = {};
+  opnameAddedPrice = {};
   state.items.forEach(item=>{
     const qty = stockQty(locationId, item.id);
     if(qty > 0) opnameCounts[item.id] = srHasSmallUnit(item) ? qty * item.conversionQty : qty;
@@ -3720,6 +3770,8 @@ function openOpnameCounting(locationId){
     Object.assign(opnameCounts, draft.counts || {});
     opnameTouched = {...(draft.touched || {})};
     opnameAdded = {...(draft.added || {})};
+    opnameAddedPeruntukan = {...(draft.addedPeruntukan || {})};
+    opnameAddedPrice = {...(draft.addedPrice || {})};
     toast('Draft opname ' + whName(locationId) + ' dilanjutkan (tersimpan terakhir ' + fmtTime(draft.updatedAt) + ').');
   }
   state.opnameSearch = ''; state.opnamePage = 1; state.opnamePeruntukan = ''; state.opnameSort = 'name_asc';
@@ -3762,13 +3814,19 @@ function opnameUpdateTotals(){
     if(!item) return;
     const useSmall = srHasSmallUnit(item);
     const canonicalQty = useSmall ? (opnameCounts[itemId] / item.conversionQty) : opnameCounts[itemId];
-    const value = canonicalQty * (item.lastPrice||0);
     const addedType = opnameAdded[itemId];
-    if(addedType==='wip'){ addedWipValue += value; return; }
-    if(addedType==='goods'){ addedGoodsValue += value; return; }
+    const priceOverride = (addedType && opnameAddedPrice[itemId]!=null) ? opnameAddedPrice[itemId] : null;
+    const value = priceOverride!=null ? priceOverride : canonicalQty * (item.lastPrice||0);
+    // Nilai Tercatat (totalValue) sekarang menggabungkan nilai Tambahan/WIP
+    // juga -- lihat actionSubmitOpnameCount -- addedGoodsValue/addedWipValue
+    // di bawah cuma rincian informasi dari total itu, bukan di luar total.
+    if(addedType==='wip') addedWipValue += value;
+    else if(addedType==='goods') addedGoodsValue += value;
     totalValue += value;
-    const systemDisplay = opnameSystemDisplay(locationId, item);
-    if(Math.abs(opnameCounts[itemId] - systemDisplay) > 0.0001) changedCount++;
+    if(!addedType){
+      const systemDisplay = opnameSystemDisplay(locationId, item);
+      if(Math.abs(opnameCounts[itemId] - systemDisplay) > 0.0001) changedCount++;
+    }
   });
   const hint = document.getElementById('opnameTotalHint');
   if(hint) hint.innerHTML = 'Total Nilai (fisik): <b>' + fmtIDR(totalValue) + '</b>'
@@ -3836,8 +3894,8 @@ function renderOpnameCounting(){
         </select>
         ${filtersActive ? `<button class="btn btn-sm btn-outline" onclick="resetOpnameFilters()">Reset</button>` : ''}
       </div>
-      <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang yang ditambahkan manual lewat "Tambah Barang"/"Tambah Barang WIP" (ditandai "Tambahan"/"WIP") hanya tercatat di data Stok Opname — tidak memengaruhi stok/inventory yang sebenarnya.</div>
-      ${wipCategory ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang WIP (${escapeHtml(wipCategory)}) tidak pernah masuk lewat Penerimaan Barang — tambahkan manual di sini kalau ada yang mau dihitung.</div>` : ''}
+      <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang yang ditambahkan manual lewat "Tambah Barang" (ditandai "Tambahan") ikut menyesuaikan stok/inventory sebenarnya begitu opname ini dikunci — jadi basis stok besok — tapi tidak tercatat sebagai Penerimaan Barang.</div>
+      ${wipCategory ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang WIP (${escapeHtml(wipCategory)}, ditandai "WIP") tidak pernah masuk lewat Penerimaan Barang dan qty-nya tidak memengaruhi stok/inventory sebenarnya — tapi nilainya tetap dihitung ke Nilai Tercatat lokasi ini.</div>` : ''}
       ${isStorage ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Selisih hasil hitung di sini dibebankan ke Mix Use, karena opname tidak tahu selisih itu milik alokasi divisi yang mana.</div>` : ''}
       <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Barang yang punya konversi Satuan Kecil dihitung langsung dalam satuan kecil untuk akurasi maksimal.</div>
       <div class="table-scroll">
@@ -3962,7 +4020,15 @@ function renderOpnameCorrect(){
     return;
   }
   const q = (state.opnameCorrectSearch||'').toLowerCase();
-  let items = (detail.items||[]).filter(it=>!it.addedType); // barang tambahan manual tidak pernah menyentuh stok -- tidak dikoreksi di sini
+  // Barang Tambahan/WIP belum didukung untuk dikoreksi di menu ini setelah
+  // dikunci -- "Tambahan" sudah menjadi stok nyata sejak submit awal (lihat
+  // actionSubmitOpnameCount) dan "WIP" tidak pernah menyentuh stok sama
+  // sekali, tapi keduanya sama-sama tidak punya jalur revisi di sini. Kalau
+  // salah input pada barang jenis ini setelah terkunci, untuk "Tambahan"
+  // koreksinya baru bisa lewat opname periode berikutnya (saat itu barangnya
+  // sudah jadi barang sistem biasa, bukan "Tambahan" lagi) -- kalau perlu
+  // bisa dikoreksi langsung di periode yang sama, menu ini perlu diperluas.
+  let items = (detail.items||[]).filter(it=>!it.addedType);
   if(q) items = items.filter(it=>(it.itemName||'').toLowerCase().includes(q) || (it.kode||'').toLowerCase().includes(q));
   items = items.slice().sort((a,b)=>(a.itemName||'').localeCompare(b.itemName||''));
 
@@ -4060,8 +4126,13 @@ async function saveOpnameCorrection(){
         if(peruntukanValues) peruntukanValues.mix = (peruntukanValues.mix||0) + delta*(it.price||0);
       }
     }
-    const totalValue = newItems.reduce((s,it)=> s + (it.addedType ? 0 : (it.nilaiFisik||0)), 0);
-    const systemTotalValue = newItems.reduce((s,it)=> s + (it.addedType ? 0 : (it.systemQty||0)*(it.price||0)), 0);
+    // totalValue (Nilai Tercatat) includes Tambahan/WIP items' value too, same
+    // as actionSubmitOpnameCount -- it's real closing-stock value either way,
+    // and excluding it here would silently shrink Nilai Tercatat every time a
+    // completely unrelated normal item gets corrected. systemTotalValue is
+    // unaffected either way since those items' systemQty is always 0.
+    const totalValue = newItems.reduce((s,it)=> s + (it.nilaiFisik||0), 0);
+    const systemTotalValue = newItems.reduce((s,it)=> s + (it.systemQty||0)*(it.price||0), 0);
     const totalUsedValue = systemTotalValue - totalValue;
 
     await db.doc('opnameDetails/' + periodKey + '__' + locationId).update({
@@ -4111,8 +4182,12 @@ function openAddWipModal(){
   const body = `
     <div id="wipError"></div>
     ${available.length===0 ? `<div class="lock-note" style="margin:0 0 12px;">Semua ${available.length+already.length} barang ${escapeHtml(wipCategory)} sudah ada di daftar hitung di bawah -- tidak ada yang perlu ditambahkan lagi.</div>` : `
-    <div class="field"><label>Barang WIP (${escapeHtml(wipCategory)}) -- ${available.length} dari ${allWipItems.length} belum ditambahkan</label><select id="wipItemSelect">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}</option>`).join('')}</select></div>
-    <div class="field"><label>Jumlah Fisik</label><input type="number" id="wipQty" inputmode="decimal" min="0" step="any" placeholder="0"></div>
+    <div class="field"><label>Barang WIP (${escapeHtml(wipCategory)}) -- ${available.length} dari ${allWipItems.length} belum ditambahkan</label><select id="wipItemSelect" onchange="onWipItemSelectChange()">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}</option>`).join('')}</select></div>
+    <div class="two-col">
+      <div class="field"><label>Jumlah Fisik <span class="cell-sub" id="wipQtyUnitLabel"></span></label><input type="number" id="wipQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="onWipQtyInput()"></div>
+      <div class="field"><label>Harga Total (opsional)</label><input type="text" inputmode="numeric" id="wipHarga" placeholder="0" oninput="formatPriceInput(this); addWipHargaTouched=true;"></div>
+    </div>
+    <div class="cell-sub" style="margin:-8px 0 12px;">Harga Total otomatis terisi dari harga terakhir barang × Jumlah Fisik -- ubah kalau nilainya berbeda.</div>
     `}
     ${already.length>0 ? `<div class="field"><label>Sudah ada di daftar hitung (${already.length})</label><div class="cell-sub" style="max-height:120px; overflow-y:auto; line-height:1.8;">${already.map(i=>escapeHtml(i.name)).join(', ')}</div></div>` : ''}
   `;
@@ -4120,6 +4195,35 @@ function openAddWipModal(){
     ? `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`
     : `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddWip()">Tambahkan</button>`;
   openModal('Tambah Barang WIP', body, foot);
+  addWipHargaTouched = false;
+  if(available.length>0) onWipItemSelectChange();
+}
+// Tracks whether the counter has manually edited "Harga Total" in the
+// currently-open "Tambah Barang WIP" modal -- same idea as
+// addItemOpnameHargaTouched on the "Tambah Barang" modal below.
+let addWipHargaTouched = false;
+// Same unit-clarity idea as onAddItemOpnameSelectChange() on "Tambah Barang":
+// shows whether "Jumlah Fisik" here expects the small unit or the normal uom,
+// and recomputes the Harga Total default for the highlighted item.
+function onWipItemSelectChange(){
+  const sel = document.getElementById('wipItemSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const labelEl = document.getElementById('wipQtyUnitLabel');
+  if(labelEl) labelEl.textContent = item ? ('(' + (srHasSmallUnit(item) ? item.smallUnit : item.uom) + ')') : '';
+  recalcAddWipHarga();
+}
+function onWipQtyInput(){ recalcAddWipHarga(); }
+function recalcAddWipHarga(){
+  if(addWipHargaTouched) return; // person already typed their own value -- don't overwrite it
+  const sel = document.getElementById('wipItemSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const hargaEl = document.getElementById('wipHarga');
+  if(!item || !hargaEl) return;
+  const qtyEl = document.getElementById('wipQty');
+  const qty = qtyEl ? (parseFloat(qtyEl.value) || 0) : 0;
+  const physical = srHasSmallUnit(item) ? (qty / item.conversionQty) : qty;
+  const defaultTotal = Math.round(physical * (item.lastPrice||0));
+  hargaEl.value = defaultTotal ? defaultTotal.toLocaleString('id-ID') : '';
 }
 function submitAddWip(){
   const itemId = document.getElementById('wipItemSelect').value;
@@ -4127,34 +4231,80 @@ function submitAddWip(){
   const err = document.getElementById('wipError');
   if(!itemId){ err.innerHTML = errBox('Pilih barang WIP terlebih dahulu.'); return; }
   if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
+  const hargaEl = document.getElementById('wipHarga');
   opnameCounts[itemId] = qty;
   opnameAdded[itemId] = 'wip';
+  opnameAddedPrice[itemId] = hargaEl ? parsePriceInput(hargaEl.value) : 0;
   closeModal();
   renderOpnameCounting();
   scheduleOpnameDraftSave();
-  toast('Barang WIP ditambahkan ke daftar hitung (tercatat di opname, tidak memengaruhi stok).');
+  toast('Barang WIP ditambahkan ke daftar hitung (nilainya tercatat di opname, qty tidak memengaruhi stok).');
 }
+// Tracks whether the counter has manually edited "Harga Total" in the
+// currently-open "Tambah Barang" modal -- once they have, recalcAddItemOpnameHarga()
+// stops overwriting it with the item-selection/qty-based default, same idea
+// as opnameTouched above (don't clobber what someone actually typed).
+let addItemOpnameHargaTouched = false;
 function openAddOpnameItemModal(){
   const locationId = state.opnameCountLocation;
+  const isStorage = isStorageWarehouse(locationId);
   // Any warehouse can add a product found physically during counting that
   // isn't already part of this location's normal (system-tracked) count
-  // list. This is purely a Stock Opname record: submitAddOpnameItem() marks
-  // it in opnameAdded, and actionSubmitOpnameCount() skips adjustStock for
-  // anything marked there, so it can never move real inventory.
-  const available = state.items.filter(i=>!opnameCounts.hasOwnProperty(i.id)).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // list. Every item added here is marked 'goods' in opnameAdded, and
+  // actionSubmitOpnameCount() posts 'goods' items through adjustStock/logTx
+  // exactly like a normal recount delta -- the only way stock enters the
+  // system without a Penerimaan Barang document. WIP-category items ('WIP
+  // Kitchen'/'WIP Bar') are excluded from the picker below on purpose: WIP
+  // is never real warehouse stock, so it can only be added through the
+  // dedicated "Tambah Barang WIP" flow (openAddWipModal/submitAddWip),
+  // which is value-only and never touches adjustStock.
+  const available = state.items.filter(i=>!opnameCounts.hasOwnProperty(i.id) && i.category!=='WIP Kitchen' && i.category!=='WIP Bar').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   if(available.length===0){
     toast('Semua barang di Master Data sudah ada di daftar hitung ini.', true);
     return;
   }
   const body = `
     <div id="addItemOpnameError"></div>
-    <div class="lock-note" style="margin:0 0 12px;">Penambahan di sini hanya tercatat di data Stok Opname — tidak memengaruhi stok/inventory yang sebenarnya.</div>
+    <div class="lock-note" style="margin:0 0 12px;">Barang yang ditambahkan di sini akan ikut menyesuaikan stok/inventory sebenarnya begitu opname ini dikunci (jadi basis stok besok) — tapi tidak tercatat sebagai Penerimaan Barang.</div>
     <div class="field"><label>Cari Barang</label><input type="text" id="addItemOpnameSearch" placeholder="Ketik nama barang…" oninput="filterAddItemOpnameSelect(this.value)"></div>
-    <div class="field"><label>Barang (${available.length} tersedia)</label><select id="addItemOpnameSelect" size="8" style="height:auto;">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}${i.category?' — '+escapeHtml(i.category):''}</option>`).join('')}</select></div>
-    <div class="field"><label>Jumlah Fisik</label><input type="number" id="addItemOpnameQty" inputmode="decimal" min="0" step="any" placeholder="0"></div>
+    <div class="field"><label>Barang (${available.length} tersedia)</label><select id="addItemOpnameSelect" size="8" style="height:auto;" onchange="onAddItemOpnameSelectChange()">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}${i.category?' — '+escapeHtml(i.category):''}</option>`).join('')}</select></div>
+    <div class="two-col">
+      <div class="field"><label>Jumlah Fisik <span class="cell-sub" id="addItemOpnameUnitLabel"></span></label><input type="number" id="addItemOpnameQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="onAddItemOpnameQtyInput()"></div>
+      <div class="field"><label>Harga Total (opsional)</label><input type="text" inputmode="numeric" id="addItemOpnameHarga" placeholder="0" oninput="formatPriceInput(this); addItemOpnameHargaTouched=true;"></div>
+    </div>
+    <div class="cell-sub" style="margin:-8px 0 12px;">Harga Total otomatis terisi dari harga terakhir barang × Jumlah Fisik -- ubah kalau nilainya berbeda (mis. barang ini tidak dibeli lewat Penerimaan Barang).</div>
+    ${isStorage ? `
+    <div class="field"><label>Peruntukan</label><select id="addItemOpnamePeruntukan">${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}" ${p.id==='mix'?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>
+    <div class="cell-sub" style="margin-top:-8px;">${escapeHtml(whName(locationId))} adalah Gudang Utama -- pilih divisi mana barang ini untuk. "Mix Use" kalau belum jelas peruntukannya.</div>
+    ` : `<div class="cell-sub">Barang ini otomatis untuk ${escapeHtml(whName(locationId))} -- lokasi ini bukan Gudang Utama, jadi tidak perlu memilih Peruntukan.</div>`}
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddOpnameItem()">Tambahkan</button>`;
   openModal('Tambah Barang', body, foot);
+  addItemOpnameHargaTouched = false;
+  onAddItemOpnameSelectChange();
+}
+// Shows which unit "Jumlah Fisik" is being entered in (small unit if this
+// item has one, otherwise its normal uom) and recomputes the Harga Total
+// default for whichever item is currently highlighted in the picker.
+function onAddItemOpnameSelectChange(){
+  const sel = document.getElementById('addItemOpnameSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const labelEl = document.getElementById('addItemOpnameUnitLabel');
+  if(labelEl) labelEl.textContent = item ? ('(' + (srHasSmallUnit(item) ? item.smallUnit : item.uom) + ')') : '';
+  recalcAddItemOpnameHarga();
+}
+function onAddItemOpnameQtyInput(){ recalcAddItemOpnameHarga(); }
+function recalcAddItemOpnameHarga(){
+  if(addItemOpnameHargaTouched) return; // person already typed their own value -- don't overwrite it
+  const sel = document.getElementById('addItemOpnameSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const hargaEl = document.getElementById('addItemOpnameHarga');
+  if(!item || !hargaEl) return;
+  const qtyEl = document.getElementById('addItemOpnameQty');
+  const qty = qtyEl ? (parseFloat(qtyEl.value) || 0) : 0;
+  const physical = srHasSmallUnit(item) ? (qty / item.conversionQty) : qty;
+  const defaultTotal = Math.round(physical * (item.lastPrice||0));
+  hargaEl.value = defaultTotal ? defaultTotal.toLocaleString('id-ID') : '';
 }
 function filterAddItemOpnameSelect(q){
   const sel = document.getElementById('addItemOpnameSelect');
@@ -4170,14 +4320,20 @@ function submitAddOpnameItem(){
   const item = itemById(itemId);
   if(!item){ err.innerHTML = errBox('Pilih barang terlebih dahulu.'); return; }
   if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
-  const locationId = state.opnameCountLocation;
-  const wipCategory = wipCategoryFor(locationId);
+  const hargaEl = document.getElementById('addItemOpnameHarga');
+  const peruntukanSel = document.getElementById('addItemOpnamePeruntukan');
   opnameCounts[itemId] = qty;
-  opnameAdded[itemId] = (wipCategory && item.category===wipCategory) ? 'wip' : 'goods';
+  // Only 'goods' can land here -- WIP-category items are filtered out of
+  // the picker in openAddOpnameItemModal() above, so they can only enter
+  // through the dedicated "Tambah Barang WIP" flow (submitAddWip()).
+  opnameAdded[itemId] = 'goods';
+  opnameAddedPrice[itemId] = hargaEl ? parsePriceInput(hargaEl.value) : 0;
+  if(peruntukanSel) opnameAddedPeruntukan[itemId] = peruntukanSel.value;
+  else delete opnameAddedPeruntukan[itemId];
   closeModal();
   renderOpnameCounting();
   scheduleOpnameDraftSave();
-  toast('Barang ditambahkan ke daftar hitung (tercatat di opname, tidak memengaruhi stok).');
+  toast('Barang ditambahkan ke daftar hitung (akan ikut menyesuaikan stok saat opname ini disimpan).');
 }
 function exportOpnameTemplateAll(){
   const periodKey = state.opnamePeriod || currentPeriodKey();
@@ -4302,6 +4458,26 @@ function handleOpnameImportAllFile(inputEl){
       });
       parsedRows.forEach(r=>{ byLocation[r.locationId][r.itemId] = r.qty; });
 
+      // Rows for a zero-stock WIP-category item (exactly the ones
+      // exportOpnameTemplateAll adds with "Stok Sistem": 0 -- see the
+      // wipCategory block there) must be flagged 'wip' here too, same as the
+      // in-app "Tambah Barang WIP" flow -- otherwise, with no `added` map at
+      // all, actionSubmitOpnameCount would treat them as an ordinary
+      // system=0 item and let WIP quietly become real trackable stock,
+      // which is exactly what WIP items must never do (see
+      // actionSubmitOpnameCount). A row for a genuinely new non-WIP item
+      // (system=0 too) is left untagged on purpose -- that one SHOULD become
+      // real stock, same as "Tambah Barang" in the counting page.
+      const addedByLocation = {};
+      locationIdsSeen.forEach(locId=>{ addedByLocation[locId] = {}; });
+      parsedRows.forEach(r=>{
+        const item = itemById(r.itemId);
+        const wipCategory = wipCategoryFor(r.locationId);
+        if(item && wipCategory && item.category===wipCategory && stockQty(r.locationId, r.itemId) <= 0){
+          addedByLocation[r.locationId][r.itemId] = 'wip';
+        }
+      });
+
       hideLoading();
       inputEl.value = '';
       const locationNames = [...locationIdsSeen].map(id=>whName(id)).join(', ');
@@ -4313,7 +4489,7 @@ function handleOpnameImportAllFile(inputEl){
           const periodKey = state.opnamePeriod || currentPeriodKey();
           let locationsProcessed = 0;
           for(const locationId of locationIdsSeen){
-            const ok = await actionSubmitOpnameCount(locationId, byLocation[locationId], periodKey);
+            const ok = await actionSubmitOpnameCount(locationId, byLocation[locationId], periodKey, addedByLocation[locationId]);
             if(ok) locationsProcessed++;
           }
           hideLoading();
