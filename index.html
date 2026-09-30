@@ -912,6 +912,18 @@ const ROLES = [
   {id:'receiving', name:'Receiving', kind:'receiving', desc:'Gudang Utama', group:'Tim Gudang'},
   {id:'kitchen_leader', name:'Kitchen Leader', kind:'kitchen_leader', wh:'kitchen', desc:'Approval Dapur', group:'Kepemimpinan',
     divisionIds:['kitchen_wok','kitchen_pastry','kitchen_grill','kitchen_salad','kitchen_butcher','kitchen_central','kitchen_steward']},
+  /* Service Leader -- same division reach as the plain 'service' account below
+     (kind:'divisi', wh:'service', divisionIds:['service']: creates/edits only
+     Service's own Permintaan Barang, same as today), but gets a few narrow
+     extra view permissions on top -- see the role.id==='serviceleader' checks
+     in canViewDashboard, allowedInventoryWarehouseIds and canViewOpnameReport
+     below, same shape as Office's narrow exceptions. Unlike Kitchen Leader,
+     it does NOT approve other divisions' requests -- there's no gate/approval
+     concept for Service/Housekeeping/Security/Bar, only an extra look-around
+     view. Default login password is the shared demo password, same as every
+     other built-in account (see DEMO_PASSWORD below) -- change it from
+     Setting like any other account if it should differ. */
+  {id:'serviceleader', name:'Service Leader', kind:'divisi', wh:'service', desc:'Servis + overview Non-Dapur', group:'Kepemimpinan', divisionIds:['service']},
   {id:'kitchen_wok', name:'Kitchen Wok', kind:'divisi', wh:'kitchen', desc:'Gudang Divisi', group:'Divisi', divisionIds:['kitchen_wok']},
   {id:'kitchen_pastry', name:'Kitchen Pastry', kind:'divisi', wh:'kitchen', desc:'Gudang Divisi', group:'Divisi', divisionIds:['kitchen_pastry']},
   {id:'kitchen_grill', name:'Kitchen Grill', kind:'divisi', wh:'kitchen', desc:'Gudang Divisi', group:'Divisi', divisionIds:['kitchen_grill']},
@@ -969,7 +981,7 @@ const NAV = [
   {id:'lowstock', label:'Stok Rendah', icon:'alert', section:'LAPORAN', badgeKey:'lowstock', perm: canViewOpsReports},
   {id:'report-divisi', label:'Nilai per Divisi', icon:'stack', section:'LAPORAN', perm: canViewReports},
   {id:'stockopname', label:'Stok Opname', icon:'checklist', section:'LAPORAN', perm: canManageGudang},
-  {id:'report-opname', label:'Laporan Stok Opname', icon:'docfile', section:'LAPORAN', perm: canViewReports},
+  {id:'report-opname', label:'Laporan Stok Opname', icon:'docfile', section:'LAPORAN', perm: canViewOpnameReport},
 ];
 
 
@@ -1065,7 +1077,16 @@ function canCreateSR(role){ return role.kind==='master' || role.kind==='divisi' 
 function canEditSR(role, sr){
   if(!sr) return false;
   if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(sr.divisionId)) return true;
-  if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(sr.divisionId)) return true;
+  if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(sr.divisionId)){
+    // Once Kitchen Leader has approved this request's kitchen gate, the
+    // original kitchen division account can no longer edit it -- only
+    // Kitchen Leader may still revise it from here (their own "Catatan
+    // Revisi" flow, see openEditSrModal/isLeaderEdit) before Receiving/
+    // Master processes it. Non-kitchen divisions have no gate at all
+    // (kitchenGateStatus stays null for them), so this never applies.
+    if(isKitchenDivision(sr.divisionId) && sr.kitchenGateStatus==='passed') return false;
+    return true;
+  }
   return false;
 }
 /* Deleting is only offered while the request is still 'menunggu' -- once it's
@@ -1080,7 +1101,11 @@ function canDeleteSR(role, sr){
 }
 function canReceive(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canEditMaster(role){ return role.kind==='master' || role.kind==='receiving'; }
-function canViewDashboard(role){ return role.kind !== 'divisi'; }
+/* Every role can view Dashboard except a plain division account -- Service
+   Leader is the one division-kind exception (it also oversees several
+   divisions' inventory, see allowedInventoryWarehouseIds below), and gets
+   its own scoped dashboard, renderServiceLeaderDashboard(). */
+function canViewDashboard(role){ return role.kind !== 'divisi' || role.id==='serviceleader'; }
 /* Every role can view Inventory now, but a division account only sees its
    own warehouse's stock (never Gudang Utama or another division's) -- see
    allowedInventoryWarehouseIds. Master/Receiving stay unrestricted. */
@@ -1093,6 +1118,16 @@ function canViewInventory(role){ return role.kind==='master' || role.kind==='rec
 function allowedInventoryWarehouseIds(role){
   if(role.kind==='master' || role.kind==='receiving') return null;
   if(role.kind==='kitchen_leader') return ['kitchen','staff_meal'];
+  /* Service Leader is a 'divisi' role (same Permintaan Barang reach as the
+     plain Service account -- see ROLES above) but sees Inventory across all
+     four non-kitchen operational divisions, same shape as Kitchen Leader's
+     exception above. */
+  if(role.id==='serviceleader') return ['service','housekeeping','security','bar'];
+  /* Office also gets full, unrestricted Inventory visibility across every
+     location -- same reach as Master/Receiving, including Gudang Utama and
+     every division's warehouse -- rather than just its own Office Storage,
+     since Purchasing/Office needs the whole-company picture. */
+  if(role.id==='office') return null;
   if(role.kind==='divisi') return role.wh ? [role.wh] : []; // one warehouse each, even a kitchen division -- Staff Meal is Kitchen Leader's to see, not every kitchen account's
   return [];
 }
@@ -1121,6 +1156,11 @@ function canViewReports(role){ return role.kind==='master' || role.kind==='recei
    (Barang Masuk, Barang Bergerak, Stok Rendah) without the full Master
    Data / Inventory / Nilai per Divisi access that canViewReports grants. */
 function canViewOpsReports(role){ return canViewReports(role) || role.id==='office'; }
+/* Laporan Stok Opname gets its own narrow exception, same shape as Office's
+   above: Kitchen Leader and Service Leader both oversee several divisions'
+   stock day to day and need this view, without the rest of the Master-only
+   reports (Nilai per Divisi, etc.) canViewReports would otherwise grant. */
+function canViewOpnameReport(role){ return canViewReports(role) || role.kind==='kitchen_leader' || role.id==='serviceleader'; }
 function isKitchenDivision(divisionId){ return !!(divisionId && divisionId.indexOf('kitchen_')===0); }
 /* Store Request visibility: a division account only sees SRs it can act on
    (its own division, or for Kitchen Leader every kitchen division). Full
@@ -1588,7 +1628,7 @@ async function actionReceivingDoc(payload){
       toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
       peruntukan: peruntukan,
       supplierId: payload.supplierId||'', supplierName: payload.supplierName||'', note: payload.note||'',
-      doNumber: payload.doNumber||'', ppn: payload.ppn||0, attachmentId: payload.attachmentId||null,
+      doNumber: payload.doNumber||'', ppn: payload.ppn||0, shippingCost: payload.shippingCost||0, attachmentId: payload.attachmentId||null,
       createdAt: payload.createdAt || null,
     });
   }
@@ -1635,7 +1675,7 @@ async function actionEditReceivingDoc(docNumber, payload){
         toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
         peruntukan: peruntukan,
         supplierId: payload.supplierId||'', supplierName: payload.supplierName||'',
-        note: payload.note||'', doNumber: payload.doNumber||'', ppn: payload.ppn||0,
+        note: payload.note||'', doNumber: payload.doNumber||'', ppn: payload.ppn||0, shippingCost: payload.shippingCost||0,
         createdAt: payload.createdAt || (orig ? orig.createdAt : null),
       });
     } else {
@@ -1648,7 +1688,7 @@ async function actionEditReceivingDoc(docNumber, payload){
         toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
         peruntukan: peruntukan,
         supplierId: payload.supplierId||'', supplierName: payload.supplierName||'', note: payload.note||'',
-        doNumber: payload.doNumber||'', ppn: payload.ppn||0, attachmentId: first.attachmentId||null,
+        doNumber: payload.doNumber||'', ppn: payload.ppn||0, shippingCost: payload.shippingCost||0, attachmentId: first.attachmentId||null,
         createdAt: payload.createdAt || first.createdAt,
       });
     }
@@ -2806,6 +2846,7 @@ function getLowStockRows(){
 function renderDashboard(){
   const role = currentRole();
   if(role.kind==='kitchen_leader'){ renderKitchenLeaderDashboard(); return; }
+  if(role.id==='serviceleader'){ renderServiceLeaderDashboard(); return; }
   const totalItemTypes = state.items.length;
   const itemsWithStock = state.items.filter(i=>totalStock(i.id) > 0).length;
   const stockCoveragePct = totalItemTypes > 0 ? (itemsWithStock / totalItemTypes * 100) : 0;
@@ -3083,6 +3124,73 @@ function renderKitchenLeaderDashboard(){
       <div class="panel-head"><h3>Aktivitas Dapur Terbaru</h3></div>
       <div class="panel-body" style="padding:0;">
         ${recentKitchen.length===0 ? `<div class="empty-row" style="padding:26px 16px;">Belum ada aktivitas.</div>` : renderMoveRowsWithDividers(recentKitchen)}
+      </div>
+    </div>
+  `;
+}
+/* Service Leader's own scoped dashboard -- same idea as
+   renderKitchenLeaderDashboard() above (a division-scoped role gets a
+   dashboard limited to what it's allowed to see, not the master/receiving
+   full-org one), but shaped differently: Service Leader doesn't gate-approve
+   other divisions' requests the way Kitchen Leader does (there's no such
+   concept outside Kitchen), so instead of an approval queue this shows the
+   inventory value/location breakdown across its four warehouses -- the
+   "Dashboard yang ada inventorynya" the role was asked for. */
+function renderServiceLeaderDashboard(){
+  const role = currentRole();
+  const myDivisionIds = role.divisionIds || []; // ['service']
+  const myWarehouseIds = allowedInventoryWarehouseIds(role) || []; // ['service','housekeeping','security','bar']
+  const myWarehouses = WAREHOUSES.filter(w=>myWarehouseIds.includes(w.id));
+  const pendingForMe = groupByDocNumber(state.transactions.filter(t=>t.type==='request' && t.status==='menunggu' && myDivisionIds.includes(t.divisionId)));
+  const locEntries = myWarehouses.map(w=>({name:w.name, val:locationValue(w), locId:w.id})).filter(e=>e.val>0).sort((a,b)=>b.val-a.val);
+  const locTotal = locEntries.reduce((s,e)=>s+e.val,0);
+  const inventoryValue = myWarehouses.reduce((s,w)=>s+locationValue(w),0);
+  const recentScoped = state.transactions.filter(t=>{
+    if(t.type==='request') return myDivisionIds.includes(t.divisionId);
+    // Barang Masuk/Transfer/Opname across all four warehouses Service Leader
+    // oversees, same shape as Kitchen Leader's own recent-activity scope.
+    if(t.type==='in' || t.type==='transfer' || t.type==='opname') return myWarehouseIds.includes(t.toWarehouseId) || myWarehouseIds.includes(t.fromWarehouseId);
+    return false;
+  }).slice(0, 20);
+
+  document.getElementById('content').innerHTML = `
+    <div class="action-row">
+      <button class="btn btn-primary" onclick="openStoreRequestModal()">${ICONS.plus} Permintaan Barang</button>
+    </div>
+    <div class="kpi-strip">
+      <div class="kpi-cell">
+        <div class="kpi-head"><div class="kpi-icon gold">${ICONS.stack}</div><div class="kpi-label">Total Nilai Stok</div></div>
+        <div class="kpi-value gold">${fmtIDR(inventoryValue)}</div>
+        <div class="kpi-note">Gabungan Service, Housekeeping, Security &amp; Bar Storage</div>
+      </div>
+      <div class="kpi-cell">
+        <div class="kpi-head"><div class="kpi-icon danger">${ICONS.docfile}</div><div class="kpi-label">Permintaan Menunggu</div></div>
+        <div class="kpi-value danger">${pendingForMe.length}</div>
+        <div class="kpi-note">Permintaan Service yang belum diproses</div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Distribusi Nilai Stok per Lokasi</h3></div>
+      <div class="locsum-head"><span>Lokasi</span><span>Nilai Stok</span><span>Persentase</span></div>
+      ${locEntries.length===0 ? `<div class="empty-row" style="padding:26px 16px;">Belum ada stok tercatat.</div>` :
+        locEntries.map((x,i)=>`
+          <div class="locsum-row clickable" onclick="goto('inventory'); setInvLocation('${x.locId}');">
+            <div class="ln-name">${escapeHtml(x.name)}</div>
+            <div class="ln-value">${fmtIDR(x.val)}</div>
+            <div class="ln-track"><div class="ln-fill" style="width:${Math.max(2, locTotal>0?(x.val/locTotal*100):0)}%; background:${donutSegmentColor(i)};"></div></div>
+            <div class="ln-pct">${(locTotal>0?(x.val/locTotal*100):0).toFixed(0)}%</div>
+          </div>`).join('')}
+      ${locEntries.length===0 ? '' : `
+      <div class="loc-row dash-total-row" style="background:var(--surface-2);">
+        <div class="lr-name" style="font-weight:800; font-size:14px;">Total</div>
+        <div class="lr-val" style="font-weight:800; font-size:16px; width:140px;">${fmtIDR(locTotal)}</div>
+        <div class="lr-pct" style="font-weight:800; font-size:13px;">100%</div>
+      </div>`}
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h3>Aktivitas Terbaru</h3></div>
+      <div class="panel-body" style="padding:0;">
+        ${recentScoped.length===0 ? `<div class="empty-row" style="padding:26px 16px;">Belum ada aktivitas.</div>` : renderMoveRowsWithDividers(recentScoped)}
       </div>
     </div>
   `;
@@ -3748,7 +3856,11 @@ function renderOpnameCounting(){
                 const isAdded = opnameAdded.hasOwnProperty(item.id);
                 const touched = opnameTouched[item.id] || isAdded;
                 const peruntukanParts = (isStorage && !isAdded) ? PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(locationId, item.id, p.id)})).filter(p=>p.qty>0) : [];
-                const peruntukanLabel = peruntukanParts.length ? peruntukanParts.map(p=>escapeHtml(p.name)+' - '+fmtNum(opnameDisplayQty(item,p.qty))).join(' · ') : '—';
+                // Cuma nama peruntukan, tanpa "- jumlah" -- jumlahnya sudah ada
+                // sendiri di kolom "Stok Sistem" di sebelah kanan, jadi angka di
+                // sini cuma duplikat (dan untuk barang dengan 1 peruntukan saja,
+                // yang paling umum, malah terlihat aneh diulang persis sama).
+                const peruntukanLabel = peruntukanParts.length ? peruntukanParts.map(p=>escapeHtml(p.name)).join(' · ') : '—';
                 return `<tr>
                   <td class="cell-title">${escapeHtml(item.name)}${isWip?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">WIP</span>':''}${(!isWip && isAdded)?' <span class="tag tag-pending" style="font-size:9px; padding:1px 6px;">Tambahan</span>':''}</td>
                   ${isStorage?`<td>${peruntukanLabel}</td>`:''}
@@ -4085,8 +4197,10 @@ function exportOpnameTemplateAll(){
       const displayQty = useSmall ? qty * item.conversionQty : qty;
       let peruntukanLabel = '';
       if(showPeruntukan){
+        // Cuma nama peruntukan -- lihat catatan yang sama di renderOpnameCounting,
+        // jumlahnya sudah ada sendiri di kolom "Stok Sistem".
         const parts = PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(w.id, item.id, p.id)})).filter(p=>p.qty>0);
-        peruntukanLabel = parts.length ? parts.map(p=>p.name+' - '+fmtNum(useSmall ? p.qty*item.conversionQty : p.qty)).join(' · ') : '—';
+        peruntukanLabel = parts.length ? parts.map(p=>p.name).join(' · ') : '—';
       }
       rows.push({
         'Lokasi': w.name,
@@ -4456,10 +4570,11 @@ function openReceivingDetail(docNumber){
   const body = `
     <div id="grAttachError"></div>
     <div class="lock-note">${first.supplierName?`Supplier <b>${escapeHtml(first.supplierName)}</b> · `:''}${fmtDate(first.createdAt)}</div>
-    ${first.doNumber || first.ppn ? `
+    ${first.doNumber || first.ppn || first.shippingCost ? `
       <div class="two-col" style="margin-bottom:14px;">
         ${first.doNumber ? `<div class="field" style="margin:0;"><label>No. Surat Jalan / DO</label><div class="cell-title">${escapeHtml(first.doNumber)}</div></div>` : ''}
         ${first.ppn ? `<div class="field" style="margin:0;"><label>PPN</label><div class="cell-title">${fmtIDR(first.ppn)} <span class="cell-sub">(catatan, tidak termasuk Total)</span></div></div>` : ''}
+        ${first.shippingCost ? `<div class="field" style="margin:0;"><label>Harga Pengiriman</label><div class="cell-title">${fmtIDR(first.shippingCost)} <span class="cell-sub">(catatan, tidak termasuk Total)</span></div></div>` : ''}
       </div>
     ` : ''}
     <div class="field" style="margin-bottom:14px;">
@@ -7574,6 +7689,14 @@ function openReceivingModal(editDocNumber){
         </div>
       </div>
     </div>
+    <div class="two-col">
+      <div class="field"><label>Harga Pengiriman (opsional)</label>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <input type="text" inputmode="numeric" id="grShipping" placeholder="0" value="${isEdit&&first.shippingCost?Number(first.shippingCost).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
+          <span class="cell-sub" style="flex-shrink:0;">Tidak masuk Total</span>
+        </div>
+      </div>
+    </div>
     <div class="field"><label>Barang</label><div class="cell-sub" style="margin-bottom:6px;">Tiap barang bisa punya Lokasi Tujuan sendiri-sendiri.</div><div id="grLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="grAddLine()">+ Tambah Barang</button>
     </div>
@@ -7780,6 +7903,7 @@ async function submitReceivingDoc(editDocNumber){
   const note = document.getElementById('grNote').value.trim();
   const doNumber = document.getElementById('grDoNumber').value.trim();
   const ppn = parsePriceInput(document.getElementById('grPpn').value);
+  const shippingCost = parsePriceInput(document.getElementById('grShipping').value);
   const dateTimeVal = document.getElementById('grDateTime').value;
   const createdAt = dateTimeVal ? new Date(dateTimeVal).toISOString() : new Date().toISOString();
   const err = document.getElementById('grError');
@@ -7794,7 +7918,7 @@ async function submitReceivingDoc(editDocNumber){
   }));
   await submitGuarded(err, async ()=>{
     if(editDocNumber){
-      await actionEditReceivingDoc(editDocNumber, {supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, createdAt});
+      await actionEditReceivingDoc(editDocNumber, {supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, shippingCost, createdAt});
       return;
     }
     let attachmentId = null;
@@ -7807,7 +7931,7 @@ async function submitReceivingDoc(editDocNumber){
         throw new Error('Gagal mengunggah PDF (' + (e && e.code ? e.code : 'error') + '). Coba lagi atau simpan tanpa lampiran.');
       }
     }
-    await actionReceivingDoc({supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, attachmentId, createdAt});
+    await actionReceivingDoc({supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, shippingCost, attachmentId, createdAt});
   });
 }
 
@@ -8607,7 +8731,7 @@ const VIEW_PERM = {
   dashboard: canViewDashboard, inventory: canViewInventory, stockopname: canManageGudang,
   receiving: canReceive, items: canViewMasterData, suppliers: canViewSuppliers, locations: canViewMasterData, wipitems: canViewWipItems,
   'report-masuk': canViewOpsReports, 'report-keluar': canViewOpsReports, lowstock: canViewOpsReports, 'report-divisi': canViewReports,
-  'report-opname': canViewReports, wiprequests: canSeeWipNav, 'report-wip': canSeeWipNav,
+  'report-opname': canViewOpnameReport, wiprequests: canSeeWipNav, 'report-wip': canSeeWipNav,
   'opname-correct': role => role.kind==='master',
 };
 function defaultViewForRole(role){
