@@ -6675,7 +6675,11 @@ function buildOpnameReport1Groups(rowsForDirect, rowsForStorage){
   // alphabetical item order.
   DIRECT_WAREHOUSES.forEach(w=>{
     rowsForDirect(w.id).forEach(r=>{
-      groupById[w.id].rows.push({ ...r, penyimpanan: w.name, locOrder:1, jumlah: r.qty*(r.price||0) });
+      // r.value, when supplied (the historical report path), is the item's
+      // own recorded nilaiFisik -- exact by definition. The live path never
+      // sets it, so it falls back to qty*price as before.
+      const jumlah = (r.value!=null) ? r.value : r.qty*(r.price||0);
+      groupById[w.id].rows.push({ ...r, penyimpanan: w.name, locOrder:1, jumlah });
     });
   });
   STORAGE_WAREHOUSES.forEach(sw=>{
@@ -6684,7 +6688,11 @@ function buildOpnameReport1Groups(rowsForDirect, rowsForStorage){
         const qty = (r.peruntukanQty && r.peruntukanQty[p.id]) || 0;
         if(qty > 0.0001){
           const target = p.id==='mix' ? mixGroup : groupById[p.id];
-          if(target) target.rows.push({ itemId:r.itemId, name:r.name, category:r.category, uom:r.uom, qty, price:r.price, penyimpanan: sw.name, locOrder:0, jumlah: qty*(r.price||0) });
+          // r.peruntukanValue, when supplied (the historical report path),
+          // is this bucket's exact Rupiah share (see historicalReport1Groups);
+          // the live path never sets it, so it falls back to qty*price.
+          const jumlah = (r.peruntukanValue && r.peruntukanValue[p.id]!=null) ? r.peruntukanValue[p.id] : qty*(r.price||0);
+          if(target) target.rows.push({ itemId:r.itemId, name:r.name, category:r.category, uom:r.uom, qty, price:r.price, penyimpanan: sw.name, locOrder:0, jumlah });
         }
       });
     });
@@ -6780,7 +6788,13 @@ function historicalReport1Groups(periodKey){
     if(!d || !d.items) return [];
     return d.items.map(it=>{
       const master = itemById(it.itemId);
-      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, qty: historicalCanonicalQty(it), price: it.price||0 };
+      // 'value' carries the item's own recorded nilaiFisik straight through,
+      // so the report's Jumlah column can use it directly instead of
+      // recomputing qty*price -- qty here is itself derived from nilaiFisik/
+      // price (see historicalCanonicalQty), so multiplying it back out by
+      // price doesn't always land on the exact same float nilaiFisik started
+      // as. Passing the authoritative value avoids that round-trip entirely.
+      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, qty: historicalCanonicalQty(it), price: it.price||0, value: it.nilaiFisik||0 };
     });
   };
   const storage = swId => {
@@ -6839,7 +6853,37 @@ function historicalReport1Groups(periodKey){
           peruntukanQty = { ...it.peruntukanQty };
         }
       }
-      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, peruntukanQty, price: it.price||0 };
+      // peruntukanValue mirrors peruntukanQty but in Rupiah, so Report 1's
+      // Jumlah column -- what finance actually reconciles against the SO's
+      // own nilaiFisik -- lands exactly on it, rupiah for rupiah. Naively
+      // multiplying each (possibly rescaled) bucket's qty by price and
+      // summing can leave a few rupiah of floating-point residue behind
+      // (the qty above may itself already be nilaiFisik/price from
+      // historicalCanonicalQty, or a rescaled fraction of it -- multiplying
+      // back out by price doesn't always return the exact float it started
+      // from). Rather than let that residue scatter invisibly across many
+      // items, this item's displayed buckets foot exactly to its own
+      // nilaiFisik by construction: every bucket keeps its natural qty*price
+      // value, except the single largest bucket, which absorbs whatever's
+      // left over. The largest bucket is guaranteed to already be shown (its
+      // qty can't be near the display cutoff), so the correction is never
+      // silently dropped the way a correction parked in a near-zero bucket
+      // could be. Gram amounts (peruntukanQty) are untouched either way.
+      const price = it.price||0;
+      let peruntukanValue = null;
+      if(price > 0){
+        peruntukanValue = {};
+        let total = 0, plugKey = null, plugQty = -1;
+        Object.keys(peruntukanQty).forEach(k=>{
+          const qty = peruntukanQty[k]||0;
+          const v = qty*price;
+          peruntukanValue[k] = v;
+          total += v;
+          if(qty > plugQty){ plugQty = qty; plugKey = k; }
+        });
+        if(plugKey!=null) peruntukanValue[plugKey] += ((it.nilaiFisik||0) - total);
+      }
+      return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, peruntukanQty, peruntukanValue, price: it.price||0 };
     });
   };
   return buildOpnameReport1Groups(direct, storage);
