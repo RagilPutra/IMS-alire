@@ -1102,6 +1102,11 @@ function canApproveKitchenGate(role){ return role.kind==='kitchen_leader'; }
 function canCreateSR(role){ return role.kind==='master' || role.kind==='divisi' || role.kind==='kitchen_leader'; }
 function canEditSR(role, sr){
   if(!sr) return false;
+  // Receiving can edit a pending request's line items directly -- this
+  // replaces the back-and-forth where Receiving had to ask the requesting
+  // division to remove/adjust an out-of-stock item themselves before an
+  // approval could go through.
+  if(role.kind==='receiving') return true;
   if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(sr.divisionId)) return true;
   if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(sr.divisionId)){
     // Once Kitchen Leader has approved this request's kitchen gate, the
@@ -1907,14 +1912,21 @@ function confirmApproveKitchenGate(docNumber){
   openConfirm('Setujui Permintaan', 'Setujui Permintaan ' + docNumber + ' dan teruskan ke Receiving untuk diproses?', async ()=>{ await actionApproveKitchenGate(docNumber); }, 'Setujui', false);
 }
 function confirmDeleteSr(docNumber){
-  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  // Only 'menunggu' lines are ever eligible -- a line already 'disetujui'
+  // already moved real stock (see actionApproveAndTransfer) and must never
+  // be deleted from here; it stays a permanent record even if the rest of
+  // the same request document gets deleted.
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteSR(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
-  openConfirm('Hapus Permintaan', `Hapus Permintaan ${docNumber}? Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteSr(docNumber), 'Hapus', true);
+  const msg = lines.length < state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber).length
+    ? `Hapus ${lines.length} baris yang masih menunggu dari Permintaan ${docNumber}? Baris yang sudah disetujui/ditransfer tidak akan terhapus. Tindakan ini tidak bisa dibatalkan.`
+    : `Hapus Permintaan ${docNumber}? Tindakan ini tidak bisa dibatalkan.`;
+  openConfirm('Hapus Permintaan', msg, ()=>actionDeleteSr(docNumber), 'Hapus', true);
 }
 async function actionDeleteSr(docNumber){
-  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
   if(lines.length===0) return;
   const role = currentRole();
   if(!canDeleteSR(role, lines[0])){ toast('Anda tidak dapat menghapus permintaan ini.', true); return; }
@@ -1927,15 +1939,24 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
      fields actually present are written, so editing one never wipes the
      other -- that's what kept Receiving from telling a Kitchen Leader's
      revision note apart from the original requester's note. */
-  const existingLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
-  if(existingLines.length===0) throw new Error('Permintaan tidak ditemukan.');
-  if(existingLines[0].status!=='menunggu') throw new Error('Permintaan ini sudah diproses, tidak bisa diubah lagi.');
-  const first = existingLines[0];
+  const allLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  if(allLines.length===0) throw new Error('Permintaan tidak ditemukan.');
+  const first = allLines[0];
+  // Only 'menunggu' lines are ever in scope for an edit -- with partial
+  // approval (actionApproveAndTransfer) a line can already be 'disetujui'
+  // and have moved real stock, so it must never be edited or deleted here
+  // even if the submitted `lines` payload doesn't include its _txId. The
+  // edit modal (openEditSrModal) only ever loads pending lines into the
+  // form to begin with, but this re-filters defensively rather than trusting
+  // whatever _txId set the caller happens to pass.
+  const pendingLines = allLines.filter(t=>t.status==='menunggu');
+  if(pendingLines.length===0) throw new Error('Permintaan ini sudah diproses, tidak bisa diubah lagi.');
   if(lines.length===0) throw new Error('Pilih minimal 1 barang dengan jumlah lebih dari 0.');
+  const pendingIds = new Set(pendingLines.map(l=>l.id));
   const keepIds = new Set();
   for(const line of lines){
     const item = itemById(line.itemId);
-    if(line._txId){
+    if(line._txId && pendingIds.has(line._txId)){
       keepIds.add(line._txId);
       await db.doc('transactions/'+line._txId).update({
         itemId: item.id, itemName: item.name, uom: item.uom,
@@ -1943,7 +1964,7 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
         ...('note' in noteFields ? {note: noteFields.note||''} : {}),
         ...('leaderNote' in noteFields ? {leaderNote: noteFields.leaderNote||'', leaderNoteBy: noteFields.leaderNoteBy||null, leaderNoteAt: new Date().toISOString()} : {}),
       });
-    } else {
+    } else if(!line._txId){
       await logTx({
         type:'request', status:'menunggu', docNumber,
         itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
@@ -1955,8 +1976,11 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
         kitchenGateStatus: first.kitchenGateStatus || null,
       });
     }
+    // a line._txId that isn't in pendingIds (already approved/rejected) is
+    // silently skipped here -- never updated, never counted toward keepIds,
+    // so the sweep below leaves it alone rather than deleting it.
   }
-  for(const line of existingLines){
+  for(const line of pendingLines){
     if(!keepIds.has(line.id)) await db.doc('transactions/'+line.id).delete();
   }
   toast('Permintaan ' + docNumber + ' berhasil diubah.');
@@ -1964,8 +1988,14 @@ async function actionEditStoreRequestDoc(docNumber, lines, noteFields){
 
 async function actionDecideRequestDoc(docNumber, decision, note){
   if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan Barang.', true); return; }
-  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
-  if(lines.length===0 || lines[0].status!=='menunggu') return;
+  // Only the lines still 'menunggu' are affected -- with partial approval
+  // (actionApproveAndTransfer can now approve a subset of a request's lines)
+  // some lines may already be 'disetujui' and must never be touched here;
+  // gating on lines[0].status would silently no-op the whole action the
+  // moment any single line had been approved, which is exactly the bug a
+  // flat lines[0] check caused once partial approval became possible.
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
+  if(lines.length===0){ toast('Tidak ada baris yang masih menunggu untuk diproses.', true); return; }
   try{
     for(const line of lines){
       await db.doc('transactions/'+line.id).update({ status: decision, decidedAt: new Date().toISOString(), decidedByRole: state.role, decidedByRoleName: currentRole().name, rejectNote: note || null });
@@ -1976,41 +2006,108 @@ async function actionDecideRequestDoc(docNumber, decision, note){
   }
 }
 
-async function actionApproveAndTransfer(docNumber, sourceLocationId){
-  if(!canApproveSR(currentRole())){ throw new Error('Peran ini tidak dapat memproses Permintaan Barang.'); }
-  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
-  if(lines.length===0) throw new Error('Tidak ada baris yang menunggu persetujuan.');
-  const toWarehouseId = lines[0].toWarehouseId; // requesting division
-  for(const line of lines){
-    const divisionQty = stockQtyByPeruntukan(sourceLocationId, line.itemId, toWarehouseId);
-    const mixQty = stockQtyByPeruntukan(sourceLocationId, line.itemId, 'mix');
-    const combined = divisionQty + mixQty;
-    if(combined < line.qty){
-      throw new Error('Stok ' + line.itemName + ' untuk ' + whName(toWarehouseId) + ' (termasuk Mix Use) tidak cukup di ' + whName(sourceLocationId) + '. Tersedia ' + fmtNum(combined) + ', dibutuhkan ' + fmtNum(line.qty) + '. Sisanya mungkin teralokasi untuk divisi lain.');
+/* Works out which Gudang Utama (STORAGE_WAREHOUSES only -- never a
+   division's own DIRECT_WAREHOUSES warehouse) can fulfil one SR line's
+   qty for its requesting division, instead of making Receiving pick a
+   single source warehouse for the whole document up front. One item can
+   legitimately sit in more than one of Dry/Cold/Freezer Storage at once,
+   so a single dropdown for the whole request made some perfectly
+   fulfillable requests impossible to approve (a real case: 3 items each
+   needing a different Gudang Utama as their source). Draws down a
+   warehouse's own allocation-to-this-division bucket first, then its Mix
+   Use bucket, before moving on to the next warehouse -- same per-warehouse
+   draw-down order the approval flow always used, just now repeated across
+   every Gudang Utama instead of one fixed one. */
+function srItemSourcePlan(itemId, toWarehouseId, qty){
+  let remaining = qty;
+  const buckets = [];
+  let totalAvailable = 0;
+  STORAGE_WAREHOUSES.forEach(w=>{
+    const divisionQty = stockQtyByPeruntukan(w.id, itemId, toWarehouseId);
+    const mixQty = stockQtyByPeruntukan(w.id, itemId, 'mix');
+    totalAvailable += divisionQty + mixQty;
+    if(remaining > 0.0001){
+      const fromDivision = Math.min(remaining, divisionQty);
+      if(fromDivision > 0.0001){
+        buckets.push({warehouseId: w.id, peruntukan: toWarehouseId, qty: fromDivision});
+        remaining = Math.round((remaining - fromDivision) * 1000) / 1000;
+      }
     }
+    if(remaining > 0.0001){
+      const fromMix = Math.min(remaining, mixQty);
+      if(fromMix > 0.0001){
+        buckets.push({warehouseId: w.id, peruntukan: 'mix', qty: fromMix});
+        remaining = Math.round((remaining - fromMix) * 1000) / 1000;
+      }
+    }
+  });
+  return { sufficient: remaining <= 0.0001, totalAvailable, shortfall: Math.max(0, remaining), buckets };
+}
+/* Groups a source plan's buckets by warehouse (combining a warehouse's own
+   division-allocation bucket and its Mix Use bucket into one entry, same as
+   the original single-warehouse behavior) so the transfer log records one
+   accurate line per warehouse actually drawn from -- each with its own
+   fromWarehouseId and qty. Logging one combined line across warehouses
+   instead would misattribute the whole qty to a single warehouse, breaking
+   "Laporan Barang Bergerak"'s per-location filter (reads fromWarehouseId
+   directly) even though moveStockMulti itself always deducts correctly. */
+function srSourcePlanByWarehouse(plan){
+  const byWh = {};
+  const order = [];
+  plan.buckets.forEach(b=>{
+    if(!byWh[b.warehouseId]){ byWh[b.warehouseId] = { warehouseId: b.warehouseId, fromDivision: 0, fromMix: 0 }; order.push(b.warehouseId); }
+    if(b.peruntukan==='mix') byWh[b.warehouseId].fromMix += b.qty;
+    else byWh[b.warehouseId].fromDivision += b.qty;
+  });
+  return order.map(id=>byWh[id]);
+}
+/* selectedTxIds: the transaction ids (SR line ids) Receiving checked in the
+   approve modal -- only those lines are processed; any other still-pending
+   line in the same document is left untouched so it can be approved later
+   once restocked (see openApproveModal). */
+async function actionApproveAndTransfer(docNumber, selectedTxIds){
+  if(!canApproveSR(currentRole())){ throw new Error('Peran ini tidak dapat memproses Permintaan Barang.'); }
+  const allPending = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
+  if(allPending.length===0) throw new Error('Tidak ada baris yang menunggu persetujuan.');
+  const selectedSet = new Set(selectedTxIds||[]);
+  const lines = allPending.filter(l=>selectedSet.has(l.id));
+  if(lines.length===0) throw new Error('Pilih minimal 1 barang yang stoknya cukup untuk disetujui.');
+  const toWarehouseId = allPending[0].toWarehouseId; // requesting division
+  // Re-check every selected line against the CURRENT stock snapshot right
+  // before moving anything -- the modal's checkbox state can be a moment
+  // stale (stock may have moved since it was opened), so this is the real
+  // gate, not just the UI's pre-filter. Nothing is moved until every
+  // selected line passes, so a mid-batch surprise can't leave some items
+  // transferred and others not within the same click.
+  const plans = {};
+  for(const line of lines){
+    const plan = srItemSourcePlan(line.itemId, toWarehouseId, line.qty);
+    if(!plan.sufficient){
+      throw new Error('Stok ' + line.itemName + ' untuk ' + whName(toWarehouseId) + ' di Gudang Utama sudah berubah dan tidak lagi cukup (tersedia ' + fmtNum(plan.totalAvailable) + ', dibutuhkan ' + fmtNum(line.qty) + '). Tutup dan buka ulang Setujui untuk melihat status stok terbaru.');
+    }
+    plans[line.id] = plan;
   }
   const trDocNumber = await nextDocNumber('TR');
   for(const line of lines){
-    const divisionQty = stockQtyByPeruntukan(sourceLocationId, line.itemId, toWarehouseId);
-    const fromDivision = Math.min(line.qty, divisionQty);
-    const fromMix = Math.round((line.qty - fromDivision) * 1000) / 1000;
-    const sourceBuckets = [];
-    if(fromDivision > 0) sourceBuckets.push({warehouseId: sourceLocationId, peruntukan: toWarehouseId, qty: fromDivision});
-    if(fromMix > 0) sourceBuckets.push({warehouseId: sourceLocationId, peruntukan: 'mix', qty: fromMix});
-    await moveStockMulti(sourceBuckets, toWarehouseId, line.itemId);
-
+    const plan = plans[line.id];
+    await moveStockMulti(plan.buckets, toWarehouseId, line.itemId);
     const item = itemById(line.itemId);
-    await logTx({
-      type:'transfer', status:'completed', docNumber: trDocNumber, requestDocNumber: docNumber,
-      itemId: line.itemId, itemName: line.itemName, uom: line.uom, qty: line.qty,
-      price: item?item.lastPrice||0:0, totalValue: (item?item.lastPrice||0:0)*line.qty,
-      fromWarehouseId: sourceLocationId, fromWarehouseName: whName(sourceLocationId),
-      toWarehouseId: toWarehouseId, toWarehouseName: whName(toWarehouseId),
-      note: fromDivision>0 && fromMix>0 ? `${fmtNum(fromDivision)} dari alokasi ${whName(toWarehouseId)}, ${fmtNum(fromMix)} dari Mix Use` : '',
-    });
+    for(const g of srSourcePlanByWarehouse(plan)){
+      const qty = Math.round((g.fromDivision + g.fromMix) * 1000) / 1000;
+      if(qty <= 0) continue;
+      await logTx({
+        type:'transfer', status:'completed', docNumber: trDocNumber, requestDocNumber: docNumber,
+        itemId: line.itemId, itemName: line.itemName, uom: line.uom, qty,
+        price: item?item.lastPrice||0:0, totalValue: (item?item.lastPrice||0:0)*qty,
+        fromWarehouseId: g.warehouseId, fromWarehouseName: whName(g.warehouseId),
+        toWarehouseId: toWarehouseId, toWarehouseName: whName(toWarehouseId),
+        note: g.fromDivision>0 && g.fromMix>0 ? `${fmtNum(g.fromDivision)} dari alokasi ${whName(toWarehouseId)}, ${fmtNum(g.fromMix)} dari Mix Use` : '',
+      });
+    }
     await db.doc('transactions/'+line.id).update({ status:'disetujui', decidedAt: new Date().toISOString(), decidedByRole: state.role, decidedByRoleName: currentRole().name, transferDocNumber: trDocNumber });
   }
-  toast('Permintaan ' + docNumber + ' disetujui, stok langsung ditransfer (' + trDocNumber + ').');
+  const remainingPending = allPending.length - lines.length;
+  toast('Permintaan ' + docNumber + ' disetujui (' + lines.length + ' barang), stok langsung ditransfer (' + trDocNumber + ').' + (remainingPending>0 ? ' ' + remainingPending + ' barang masih menunggu (stok belum cukup).' : ''));
 }
 
 /* =========================================================
@@ -2891,6 +2988,17 @@ function statusTag(s){
 function srStatusTag(sr){
   if(isKitchenGatePending(sr)) return `<span class="tag tag-kitchen-gate">Menunggu Kitchen Leader</span>`;
   return statusTag(sr.status);
+}
+/* Doc-level status tag for a whole Permintaan (all its lines), aware that
+   partial approval (actionApproveAndTransfer) can leave some lines
+   'disetujui' while others are still 'menunggu' in the same document --
+   srStatusTag alone only ever describes a single line. */
+function srDocStatusTag(lines){
+  if(lines.some(isKitchenGatePending)) return `<span class="tag tag-kitchen-gate">Menunggu Kitchen Leader</span>`;
+  const hasPending = lines.some(l=>l.status==='menunggu');
+  const hasApproved = lines.some(l=>l.status==='disetujui');
+  if(hasPending && hasApproved) return `<span class="tag tag-gold">Disetujui Sebagian</span>`;
+  return statusTag(lines[0].status);
 }
 function statusPill(status){
   return `<span class="status ${status}">${statusLabel(status)}</span>`;
@@ -5149,7 +5257,12 @@ function renderStoreRequests(){
   const role = currentRole();
   const all = groupByDocNumber(state.srTransactions.filter(t=>t.type==='request')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   const tabs = [{id:'menunggu', label:'Menunggu'},{id:'disetujui', label:'Disetujui'},{id:'ditolak', label:'Ditolak'},{id:'all', label:'Semua'}];
-  let docs = state.srTab==='all' ? all : all.filter(d=>d.lines[0].status===state.srTab);
+  // A document's lines can now carry different statuses after a partial
+  // approval (see actionApproveAndTransfer), so a tab shows any document
+  // that has at least one line in that status -- a partially-approved doc
+  // will appear under both "Menunggu" (it still needs action) and
+  // "Disetujui" (part of it already moved).
+  let docs = state.srTab==='all' ? all : all.filter(d=>d.lines.some(l=>l.status===state.srTab));
   if(state.srSearch){
     const q = state.srSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q) || (d.lines[0].toWarehouseName||'').toLowerCase().includes(q) || (d.lines[0].createdBy||'').toLowerCase().includes(q));
@@ -5180,31 +5293,37 @@ function renderStoreRequests(){
             ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="6">Tidak ada Permintaan Barang yang cocok.</td></tr>` :
               pageDocs.map(d=>{
                 const first = d.lines[0];
+                // Display fields (division/warehouse name, date, item count)
+                // never vary across a doc's lines, so `first` is fine for
+                // those. Status and action-eligibility DO vary once a doc
+                // can be partially approved, so those use srDocStatusTag
+                // and a representative still-pending line instead.
+                const pendingLine = d.lines.find(l=>l.status==='menunggu');
                 return `<tr class="clickable" onclick="openSrDetail('${d.docNumber}')">
                   <td class="code-mono">${d.docNumber}</td>
                   <td>${fmtDate(d.createdAt)}</td>
                   <td class="cell-title">${escapeHtml(first.divisionName || first.toWarehouseName)}</td>
                   <td>${d.lines.length} barang</td>
-                  <td>${srStatusTag(first)}</td>
+                  <td>${srDocStatusTag(d.lines)}</td>
                   <td>${(function(){
-                    const isPending = first.status==='menunggu';
-                    const kitchenPending = isKitchenGatePending(first);
-                    if(isPending && kitchenPending && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId)){
+                    if(!pendingLine) return '';
+                    const kitchenPending = isKitchenGatePending(pendingLine);
+                    if(kitchenPending && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(pendingLine.divisionId)){
                       return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
                         <button class="btn btn-sm btn-approve" onclick="confirmApproveKitchenGate('${d.docNumber}')">Setujui</button>
                         <button class="btn btn-sm btn-danger-outline" onclick="openRejectModal('${d.docNumber}')">Tolak</button>
                       </div>`;
                     }
-                    if(isPending && !kitchenPending && canApprove){
+                    if(!kitchenPending && canApprove){
                       return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
                         <button class="btn btn-sm btn-approve" onclick="openApproveModal('${d.docNumber}')">Setujui</button>
                         <button class="btn btn-sm btn-danger-outline" onclick="openRejectModal('${d.docNumber}')">Tolak</button>
                       </div>`;
                     }
-                    if(isPending && (canEditSR(role, first) || canDeleteSR(role, first))){
+                    if(canEditSR(role, pendingLine) || canDeleteSR(role, pendingLine)){
                       return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
-                        ${canEditSR(role, first) ? `<button class="btn btn-sm btn-outline" onclick="openEditSrModal('${d.docNumber}')">Edit</button>` : ''}
-                        ${canDeleteSR(role, first) ? `<button class="btn btn-sm btn-danger-outline" onclick="confirmDeleteSr('${d.docNumber}')">Hapus</button>` : ''}
+                        ${canEditSR(role, pendingLine) ? `<button class="btn btn-sm btn-outline" onclick="openEditSrModal('${d.docNumber}')">Edit</button>` : ''}
+                        ${canDeleteSR(role, pendingLine) ? `<button class="btn btn-sm btn-danger-outline" onclick="confirmDeleteSr('${d.docNumber}')">Hapus</button>` : ''}
                       </div>`;
                     }
                     return '';
@@ -5377,10 +5496,15 @@ function openSrDetail(docNumber){
   const role = currentRole();
   const first = lines[0];
   if(!canSeeSRForDivision(role, first.divisionId)){ toast('Anda tidak dapat melihat permintaan ini.', true); return; }
+  // Lines can now carry different statuses (partial approval), so action
+  // eligibility is decided from a representative still-pending line, never
+  // from `first` -- `first` stays valid only for doc-wide display fields
+  // (division/warehouse name, created date) which never vary per line.
+  const pendingLine = lines.find(l=>l.status==='menunggu');
   const body = `
     <div class="lock-note">Divisi <b>${escapeHtml(first.divisionName || first.toWarehouseName)}</b>${first.divisionName && first.divisionName!==first.toWarehouseName ? ` · Gudang ${escapeHtml(first.toWarehouseName)}` : ''} · ${fmtDate(first.createdAt)}</div>
     <div class="table-scroll" style="border:1px solid var(--border); border-radius:8px;">
-      <table><thead><tr><th>Barang</th><th class="num">Jumlah</th></tr></thead>
+      <table><thead><tr><th>Barang</th><th class="num">Jumlah</th><th>Status</th></tr></thead>
       <tbody>${lines.map(l=>{
         const primary = l.requestedUnit ? (fmtNum(l.requestedQty) + ' ' + escapeHtml(l.requestedUnit)) : (fmtNum(l.qty) + ' ' + escapeHtml(l.uom||''));
         const sub = l.requestedUnit ? `<div class="cell-sub">≈ ${fmtNum(l.qty)} ${escapeHtml(l.uom||'')}</div>` : '';
@@ -5389,33 +5513,43 @@ function openSrDetail(docNumber){
            attributed by name, so Receiving never mistakes it for the
            original requester's note -- that ambiguity was the complaint. */
         const leaderNoteHtml = l.leaderNote ? `<div class="cell-sub" style="color:var(--brand-dark); font-weight:700;">Catatan Kitchen Leader${l.leaderNoteBy?' ('+escapeHtml(l.leaderNoteBy)+')':''}: ${escapeHtml(l.leaderNote)}</div>` : '';
-        return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}${leaderNoteHtml}</td><td class="num">${primary}${sub}</td></tr>`;
+        // Per-line status/transfer/reject-note, since a document's lines can
+        // each be at a different stage after a partial approval -- one
+        // doc-level status is no longer enough to describe every row.
+        const lineStatusHtml = `<div>${srStatusTag(l)}</div>`
+          + (l.status==='disetujui' && l.transferDocNumber ? `<div class="cell-sub">Transfer: <b>${escapeHtml(l.transferDocNumber)}</b></div>` : '')
+          + (l.status==='ditolak' && l.rejectNote ? `<div class="cell-sub">Alasan: ${escapeHtml(l.rejectNote)}</div>` : '');
+        return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}${leaderNoteHtml}</td><td class="num">${primary}${sub}</td><td>${lineStatusHtml}</td></tr>`;
       }).join('')}</tbody></table>
     </div>
-    <div style="margin-top:12px;">Status: ${srStatusTag(first)}${first.transferDocNumber?` · Transfer: <b>${first.transferDocNumber}</b>`:''}</div>
-    ${first.status==='ditolak' && first.rejectNote ? `<div class="cell-sub" style="margin-top:6px;">Alasan penolakan: ${escapeHtml(first.rejectNote)}</div>` : ''}
-    ${isKitchenGatePending(first) && canApproveSR(role) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
+    <div style="margin-top:12px;">Status Permintaan: ${srDocStatusTag(lines)}</div>
+    ${pendingLine && isKitchenGatePending(pendingLine) && canApproveSR(role) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
   `;
   const canApprove = canApproveSR(role);
-  const canKitchenGate = canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId);
-  const kitchenPending = isKitchenGatePending(first);
-  const canEdit = canEditSR(role, first);
+  const canKitchenGate = !!pendingLine && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(pendingLine.divisionId);
+  const kitchenPending = !!pendingLine && isKitchenGatePending(pendingLine);
+  const canEdit = !!pendingLine && canEditSR(role, pendingLine);
   let foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
-  if(canDeleteSR(role, first)) foot += `<button class="btn btn-danger-outline" onclick="closeModal(); confirmDeleteSr('${docNumber}')">Hapus</button>`;
-  if(first.status==='menunggu' && canEdit) foot += `<button class="btn btn-outline" onclick="closeModal(); openEditSrModal('${docNumber}')">Edit</button>`;
-  if(first.status==='menunggu' && kitchenPending && canKitchenGate){
+  if(pendingLine && canDeleteSR(role, pendingLine)) foot += `<button class="btn btn-danger-outline" onclick="closeModal(); confirmDeleteSr('${docNumber}')">Hapus</button>`;
+  if(canEdit) foot += `<button class="btn btn-outline" onclick="closeModal(); openEditSrModal('${docNumber}')">Edit</button>`;
+  if(pendingLine && kitchenPending && canKitchenGate){
     foot += `<button class="btn btn-danger-outline" onclick="closeModal(); openRejectModal('${docNumber}')">Tolak</button><button class="btn btn-primary" onclick="closeModal(); confirmApproveKitchenGate('${docNumber}')">Setujui</button>`;
-  } else if(first.status==='menunggu' && !kitchenPending && canApprove){
+  } else if(pendingLine && !kitchenPending && canApprove){
     foot += `<button class="btn btn-danger-outline" onclick="closeModal(); openRejectModal('${docNumber}')">Tolak</button><button class="btn btn-primary" onclick="closeModal(); openApproveModal('${docNumber}')">Setujui</button>`;
   }
   openModal('Permintaan ' + docNumber, body, foot);
 }
 function openEditSrModal(docNumber){
-  const existingLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
-  if(existingLines.length===0) return;
-  const first = existingLines[0];
+  const allLines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber);
+  if(allLines.length===0) return;
+  const first = allLines[0];
   const role = currentRole();
-  if(first.status!=='menunggu'){ toast('Permintaan ini sudah diproses, tidak bisa diubah lagi.', true); return; }
+  // Only the still-pending lines are ever editable here -- a line already
+  // 'disetujui' has moved real stock and is excluded from the form entirely
+  // (shown read-only in openSrDetail instead), never silently dropped by
+  // actionEditStoreRequestDoc.
+  const existingLines = allLines.filter(l=>l.status==='menunggu');
+  if(existingLines.length===0){ toast('Permintaan ini sudah diproses, tidak bisa diubah lagi.', true); return; }
   if(!canEditSR(role, first)){ toast('Anda tidak dapat mengubah permintaan ini.', true); return; }
   srLines = existingLines.map(l=>({
     itemId: l.itemId,
@@ -5426,15 +5560,18 @@ function openEditSrModal(docNumber){
   /* A Kitchen Leader revising this request gets their own "Catatan Revisi"
      field instead of overwriting the original requester's Catatan -- so
      Receiving can tell, when they open the request, which note came from
-     whoever asked for it and which came from the leader's revision. */
+     whoever asked for it and which came from the leader's revision. Receiving
+     editing directly (role.kind==='receiving') reuses the plain Catatan
+     field, same as the original requesting division would see. */
   const isLeaderEdit = role.kind==='kitchen_leader';
   const noteFieldHtml = isLeaderEdit
     ? `${first.note ? `<div class="field"><label>Catatan dari ${escapeHtml(first.divisionName||first.toWarehouseName)}</label><div class="cell-sub" style="background:var(--surface-2); padding:8px 10px; border-radius:6px;">${escapeHtml(first.note)}</div></div>` : ''}
        <div class="field"><label>Catatan Revisi (Kitchen Leader)</label><textarea id="srLeaderNote" placeholder="Kenapa jumlah/barang direvisi">${escapeHtml(first.leaderNote||'')}</textarea></div>`
     : `<div class="field"><label>Catatan</label><textarea id="srNote" placeholder="Untuk keperluan apa">${escapeHtml(first.note||'')}</textarea></div>`;
+  const alreadyApprovedCount = allLines.length - existingLines.length;
   const body = `
     <div id="srError"></div>
-    <div class="lock-note">Mengubah Permintaan <b>${docNumber}</b> untuk <b>${escapeHtml(first.divisionName||first.toWarehouseName)}</b>.</div>
+    <div class="lock-note">Mengubah Permintaan <b>${docNumber}</b> untuk <b>${escapeHtml(first.divisionName||first.toWarehouseName)}</b>.${alreadyApprovedCount>0 ? ' ' + alreadyApprovedCount + ' barang yang sudah disetujui/ditransfer tidak ditampilkan di sini dan tidak akan berubah.' : ''}</div>
     <div class="field"><label>Barang</label><div id="srLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="srAddLine()">+ Tambah Barang</button>
     </div>
@@ -7090,6 +7227,9 @@ async function exportReport1Pdf(){
 }
 
 /* ---- Report 2: Nilai Penggunaan per Divisi ---- */
+// Same sign-based color convention as Opname Berjalan's Selisih Nilai
+// (see selisihColor there): positive green, negative red, zero/null neutral.
+function usageColor(val){ return (val==null || val===0) ? 'var(--text-faint)' : (val>0 ? 'var(--success)' : 'var(--danger)'); }
 function report2Rows(periodKey){
   const closingMap = groupValuesMapForPeriod(periodKey);
   const openingMap = groupValuesMapForPeriod(priorPeriodKey(periodKey));
@@ -7118,7 +7258,7 @@ function reportOpnameR2Html(){
       <div class="panel-head">
         <h3>Nilai Penggunaan per Divisi${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-          Total Usage: <b>${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
+          Total Usage: <b style="color:${usageColor(grand.incomplete?null:grand.usage)};">${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
           ${reportDownloadBtns(purchaseReady, 'exportReport2Pdf()', 'exportReport2Excel()')}
         </span>
       </div>
@@ -7133,9 +7273,9 @@ function reportOpnameR2Html(){
               <td class="num">${r.opening==null ? '<span class="cell-sub">belum ada data</span>' : fmtIDR(r.opening)}</td>
               <td class="num">${fmtIDR(r.purchase||0)}</td>
               <td class="num">${r.closing==null ? '<span class="cell-sub">belum ada data</span>' : fmtIDR(r.closing)}</td>
-              <td class="num">${r.usage==null ? '<span class="cell-sub">belum bisa dihitung</span>' : fmtIDR(r.usage)}</td>
+              <td class="num" style="color:${usageColor(r.usage)};">${r.usage==null ? '<span class="cell-sub">belum bisa dihitung</span>' : fmtIDR(r.usage)}</td>
             </tr>`).join('')}
-            <tr><td class="cell-title"><b>Grand Total</b></td><td class="num"><b>${fmtIDR(grand.opening)}</b></td><td class="num"><b>${fmtIDR(grand.purchase)}</b></td><td class="num"><b>${fmtIDR(grand.closing)}</b></td><td class="num"><b>${grand.incomplete?'—':fmtIDR(grand.usage)}</b></td></tr>
+            <tr><td class="cell-title"><b>Grand Total</b></td><td class="num"><b>${fmtIDR(grand.opening)}</b></td><td class="num"><b>${fmtIDR(grand.purchase)}</b></td><td class="num"><b>${fmtIDR(grand.closing)}</b></td><td class="num" style="color:${usageColor(grand.incomplete?null:grand.usage)};"><b>${grand.incomplete?'—':fmtIDR(grand.usage)}</b></td></tr>
           </tbody>
         </table>
       </div>
@@ -8990,20 +9130,72 @@ async function submitStoreRequestDoc(){
   await submitGuarded(err, async ()=>{ await actionStoreRequestDoc({divisionId, lines, note}); });
 }
 /* --- Setujui (langsung transfer) & Tolak (dengan catatan) --- */
+/* Gudang Utama sourcing is now fully automatic (srItemSourcePlan), so this
+   modal no longer asks Receiving to pick a source warehouse. Instead it
+   shows one checkbox per line: pre-checked and enabled when that item's
+   stock is sufficient across Gudang Utama, unchecked and disabled when it
+   isn't (with a summary banner listing exactly which items are short/out,
+   so Receiving sees that at a glance rather than discovering it one at a
+   time from an error). "Setujui Semua" approves every sufficient line in
+   one click; "Setujui yang Dicentang" approves whatever's checked, so a
+   subset can be approved now and the rest left pending for a later round
+   once restocked. */
 function openApproveModal(docNumber){
   if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan Barang.', true); return; }
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
+  if(lines.length===0){ toast('Tidak ada barang yang menunggu persetujuan di permintaan ini.', true); return; }
+  const toWarehouseId = lines[0].toWarehouseId;
+  const rows = lines.map(l=>({ line: l, plan: srItemSourcePlan(l.itemId, toWarehouseId, l.qty) }));
+  const shortRows = rows.filter(r=>!r.plan.sufficient);
+  const availableCount = rows.length - shortRows.length;
+  const banner = shortRows.length>0
+    ? `<div class="lock-note" style="border-color:var(--danger);">
+        <b>${shortRows.length} barang stoknya tidak cukup/habis di Gudang Utama:</b>
+        <ul style="margin:6px 0 0; padding-left:18px;">
+          ${shortRows.map(r=>`<li>${escapeHtml(r.line.itemName)} — tersedia ${fmtNum(r.plan.totalAvailable)}, dibutuhkan ${fmtNum(r.line.qty)}</li>`).join('')}
+        </ul>
+        <div style="margin-top:6px;">Barang ini tidak bisa disetujui sekarang. Tetap "Menunggu" sampai stoknya cukup -- atau Edit permintaan untuk menyesuaikan.</div>
+      </div>`
+    : '';
   const body = `
     <div id="apError"></div>
-    <div class="lock-note">Menyetujui akan langsung memindahkan stok untuk Permintaan <b>${docNumber}</b>. Pilih Gudang Utama sumbernya.</div>
-    <div class="field"><label>Sumber Gudang Utama</label><select id="apSource">${STORAGE_WAREHOUSES.map(w=>`<option value="${w.id}">${w.name}</option>`).join('')}</select></div>
+    <div class="lock-note">Menyetujui akan langsung memindahkan stok untuk Permintaan <b>${docNumber}</b>. Gudang Utama sumbernya ditentukan otomatis per barang.</div>
+    ${banner}
+    <div class="table-scroll" style="border:1px solid var(--border); border-radius:8px; margin-top:10px;">
+      <table>
+        <thead><tr><th style="width:36px;"></th><th>Barang</th><th class="num">Jumlah</th><th>Status</th></tr></thead>
+        <tbody>
+          ${rows.map(r=>{
+            const ok = r.plan.sufficient;
+            const statusTagHtml = ok ? '<span class="tag tag-approved">Stok cukup</span>'
+              : (r.plan.totalAvailable<=0.0001 ? '<span class="tag tag-rejected">Stok habis</span>' : '<span class="tag tag-pending">Stok kurang</span>');
+            return `<tr>
+              <td><input type="checkbox" id="apCheck_${r.line.id}" ${ok?'checked':''} ${ok?'':'disabled'}></td>
+              <td class="cell-title">${escapeHtml(r.line.itemName)}</td>
+              <td class="num">${qtyWithSmallNote(r.line.qty, itemById(r.line.itemId), r.line.uom)}</td>
+              <td>${statusTagHtml}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
   `;
-  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitApprove('${docNumber}')">Setujui &amp; Transfer</button>`;
-  openModal('Setujui Permintaan', body, foot);
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button>` +
+    (availableCount>0
+      ? `<button class="btn btn-outline" onclick="submitApprove('${docNumber}', true)">Setujui Semua (${availableCount})</button><button class="btn btn-primary" onclick="submitApprove('${docNumber}', false)">Setujui yang Dicentang</button>`
+      : '');
+  openModal('Setujui Permintaan', body, foot, true);
 }
-async function submitApprove(docNumber){
-  const sourceLocationId = document.getElementById('apSource').value;
+async function submitApprove(docNumber, approveAll){
   const err = document.getElementById('apError');
-  await submitGuarded(err, async ()=>{ await actionApproveAndTransfer(docNumber, sourceLocationId); });
+  const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && t.status==='menunggu');
+  if(lines.length===0){ err.innerHTML = errBox('Permintaan ini sudah tidak ada barang yang menunggu -- mungkin baru saja diproses. Tutup dan buka ulang.'); return; }
+  const toWarehouseId = lines[0].toWarehouseId;
+  const selectedIds = approveAll
+    ? lines.filter(l=>srItemSourcePlan(l.itemId, toWarehouseId, l.qty).sufficient).map(l=>l.id)
+    : lines.filter(l=>{ const box = document.getElementById('apCheck_'+l.id); return box && box.checked; }).map(l=>l.id);
+  if(selectedIds.length===0){ err.innerHTML = errBox('Pilih minimal 1 barang untuk disetujui.'); return; }
+  await submitGuarded(err, async ()=>{ await actionApproveAndTransfer(docNumber, selectedIds); });
 }
 function openRejectModal(docNumber){
   if(!canApproveSR(currentRole())){ toast('Peran ini tidak dapat memproses Permintaan Barang.', true); return; }
