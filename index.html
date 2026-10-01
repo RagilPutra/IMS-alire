@@ -1087,7 +1087,11 @@ const state = {
   opnameCorrectLocation: null, opnameCorrectPeriod: null, opnameCorrectSearch: '',
   activityLogSearch: '', activityLogType: '', activityLogPage: 1,
   monthlyNetSales: [],
-  reportOpname: { tab:'r1', asOf:'', period: currentPeriodKey(), histCache:{}, purchaseCache:{}, loadingHist:false, loadingPurchase:false, r1Search:'', r1Category:'', r1Location:'', r1Sort:{field:'default', dir:'asc'} },
+  // One shared period selector drives all 4 Laporan Stok Opname tabs (R1-R4)
+  // plus "Unduh Semua" -- see renderReportOpname(). `asOf` used to be a
+  // separate field just for R1 (with a dead 'live' option that was never
+  // reachable from the UI); retired in favor of this single `period`.
+  reportOpname: { tab:'r1', period: currentPeriodKey(), histCache:{}, purchaseCache:{}, loadingHist:false, loadingPurchase:false, r1Search:'', r1Category:'', r1Location:'', r1Sort:{field:'default', dir:'asc'} },
   navCollapsedSections: {}, // sidebar groups (Operasional/Master Data/Laporan) default open; toggled via toggleNavSection()
 };
 
@@ -1430,8 +1434,19 @@ function revealAppAfterLoading(){
 // once, when opened, so skipping the reactive re-render while either is
 // open is safe -- whatever changed elsewhere is picked up the moment the
 // counter leaves the page (or any of their own actions triggers a render).
+//
+// 'report-opname' (Laporan Stock Opname -- Stok Opname/Nilai Penggunaan per
+// Divisi/Food & Beverage Cost/KPI Ideal Stock) has the exact same problem on
+// its Food & Beverage Cost tab: "Net Sales Food"/"Net Sales Beverage" are
+// plain inputs whose value is redrawn from the last SAVED figure on every
+// render(), so on a busy morning (SR/Permintaan WIP being submitted/approved
+// by other staff, each writing to 'transactions' and firing this) a
+// background render could land mid-keystroke and wipe whatever was typed but
+// not yet saved -- "ketik 1 langsung balik ke 0". These 4 report tabs only
+// ever show finalized/locked periods, so they don't need live reactivity
+// while open either.
 function renderUnlessOpnameTyping(){
-  if(state.view !== 'opname-count' && state.view !== 'opname-correct') render();
+  if(state.view !== 'opname-count' && state.view !== 'opname-correct' && state.view !== 'report-opname') render();
 }
 /* Connects to the DB and starts listening to 'users' immediately at page
    load -- before login -- so accounts Master added or repasswordded from
@@ -2813,7 +2828,13 @@ function notifPanelHtml(){
   return html;
 }
 function toggleNotif(e){ if(e) e.stopPropagation(); state.notifOpen = !state.notifOpen; render(); }
-document.addEventListener('click', ()=>{ if(state.notifOpen){ state.notifOpen = false; render(); } });
+// Routed through renderUnlessOpnameTyping(), not a raw render(): this fires
+// on EVERY click anywhere on the page while the notif panel is open --
+// including the very click that focuses a Stock Opname counting/correction
+// or Laporan Stock Opname input to start typing in it, which would otherwise
+// immediately rebuild that input out from under the user before they'd typed
+// anything (see renderUnlessOpnameTyping's comment).
+document.addEventListener('click', ()=>{ if(state.notifOpen){ state.notifOpen = false; renderUnlessOpnameTyping(); } });
 
 (function(){
   let dragState = null;
@@ -4093,12 +4114,30 @@ function renderOpnameCounting(){
    antara angka lama yang sudah dikunci dan angka baru yang dimasukkan
    Master, lalu opnameDetails & opnameSessions (dan groupValues bila
    periode sudah difinalisasi) diperbarui supaya laporan tetap konsisten.
-   Hanya mengoreksi barang yang sudah tercatat di opname tsb -- bukan
-   tempat menambah barang baru, dan barang tambahan manual (WIP/Tambahan,
-   yang memang tidak pernah menyentuh stok) tidak ikut dikoreksi di sini. */
+   Barang yang sudah ada di opname tsb dikoreksi lewat opnameCorrectQty di
+   atas. Barang tambahan manual (WIP/Tambahan) yang sudah ada SEBELUM dikunci
+   tetap tidak bisa dikoreksi di sini (lihat filter !it.addedType di
+   renderOpnameCorrect) -- tapi Master sekarang BISA menambah barang/WIP BARU
+   yang terlewat lewat tombol "Tambah Barang"/"Tambah Barang WIP" di bawah,
+   khusus untuk Kitchen & Bar (lihat OPNAME_CORRECT_ADD_LOCATIONS di bawah,
+   opnameCorrectNewItems, dan openAddOpnameCorrectItemModal/
+   openAddOpnameCorrectWipModal). */
 let opnameCorrectDetail = null;
 let opnameCorrectQty = {};
 let opnameCorrectLoading = false;
+// Newly-added items staged in the locked-correction screen (Kitchen/Bar
+// only) via "Tambah Barang"/"Tambah Barang WIP" below -- NOT part of the
+// original opnameDetails.items yet, only merged in when Simpan Koreksi runs
+// (saveOpnameCorrection). Each entry: {itemId, itemName, kode, uom,
+// qty (display unit, same idea as opnameCorrectQty), price (manual Harga
+// Total override, same idea as opnameAddedPrice), addedType:'goods'|'wip'}.
+let opnameCorrectNewItems = [];
+// Adding a brand-new item into an already-locked opname is only opened up
+// for Kitchen & Bar -- the two direct-consumption locations where a missed
+// item during the original physical count is both common and, unlike a
+// Gudang Utama, doesn't need a Peruntukan choice (the location itself
+// already IS the divisi).
+const OPNAME_CORRECT_ADD_LOCATIONS = ['kitchen','bar'];
 function openOpnameCorrection(locationId, periodKey){
   const role = currentRole();
   if(role.kind!=='master'){ toast('Hanya Master User yang dapat mengoreksi opname yang sudah terkunci.', true); return; }
@@ -4107,6 +4146,7 @@ function openOpnameCorrection(locationId, periodKey){
   state.opnameCorrectSearch = '';
   opnameCorrectDetail = null;
   opnameCorrectQty = {};
+  opnameCorrectNewItems = [];
   opnameCorrectLoading = true;
   goto('opname-correct');
   loadOpnameCorrectDetail(locationId, periodKey);
@@ -4163,17 +4203,22 @@ function renderOpnameCorrect(){
     return;
   }
   const q = (state.opnameCorrectSearch||'').toLowerCase();
-  // Barang Tambahan/WIP belum didukung untuk dikoreksi di menu ini setelah
-  // dikunci -- "Tambahan" sudah menjadi stok nyata sejak submit awal (lihat
-  // actionSubmitOpnameCount) dan "WIP" tidak pernah menyentuh stok sama
-  // sekali, tapi keduanya sama-sama tidak punya jalur revisi di sini. Kalau
-  // salah input pada barang jenis ini setelah terkunci, untuk "Tambahan"
-  // koreksinya baru bisa lewat opname periode berikutnya (saat itu barangnya
-  // sudah jadi barang sistem biasa, bukan "Tambahan" lagi) -- kalau perlu
-  // bisa dikoreksi langsung di periode yang sama, menu ini perlu diperluas.
+  // Barang Tambahan/WIP yang sudah ada di opname SEBELUM dikunci masih belum
+  // bisa dikoreksi di sini -- "Tambahan" sudah menjadi stok nyata sejak
+  // submit awal (lihat actionSubmitOpnameCount) dan "WIP" tidak pernah
+  // menyentuh stok sama sekali, tapi keduanya sama-sama tidak punya jalur
+  // revisi di sini. Kalau salah input pada barang jenis ini setelah
+  // terkunci, untuk "Tambahan" koreksinya baru bisa lewat opname periode
+  // berikutnya (saat itu barangnya sudah jadi barang sistem biasa, bukan
+  // "Tambahan" lagi). Ini terpisah dari menambah barang BARU yang terlewat
+  // sama sekali dari opname awal, yang sekarang bisa lewat "Tambah Barang"/
+  // "Tambah Barang WIP" di bawah (Kitchen & Bar saja) -- lihat
+  // opnameCorrectNewItems.
   let items = (detail.items||[]).filter(it=>!it.addedType);
   if(q) items = items.filter(it=>(it.itemName||'').toLowerCase().includes(q) || (it.kode||'').toLowerCase().includes(q));
   items = items.slice().sort((a,b)=>(a.itemName||'').localeCompare(b.itemName||''));
+  const canAddNew = OPNAME_CORRECT_ADD_LOCATIONS.includes(locationId);
+  const wipCategory = canAddNew ? wipCategoryFor(locationId) : null;
 
   document.getElementById('content').innerHTML = `
     <div class="lock-note" style="margin-bottom:14px; background:var(--warning-tint); color:var(--warning); border:1px solid var(--warning);">
@@ -4210,11 +4255,190 @@ function renderOpnameCorrect(){
         </table>
       </div>
     </div>
+    ${canAddNew ? `
+    <div class="panel" style="margin-top:14px;">
+      <div class="panel-head">
+        <h3>Barang Baru / Terlewat <span style="font-weight:600; color:var(--text-secondary); font-size:12px;">(khusus ${escapeHtml(whName(locationId))})</span></h3>
+        <span class="panel-total" style="display:flex; gap:8px;">
+          <button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectItemModal()">${ICONS.plus} Tambah Barang</button>
+          ${wipCategory ? `<button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectWipModal()">${ICONS.plus} Tambah Barang WIP</button>` : ''}
+        </span>
+      </div>
+      <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Untuk barang yang ternyata terlewat sama sekali dari hitung fisik awal (bukan salah angka pada barang yang sudah tercatat). "Tambah Barang" ikut menambah stok/inventory sebenarnya begitu koreksi ini disimpan; "Tambah Barang WIP" hanya menambah nilai tercatat, tidak memengaruhi stok. Keduanya baru benar-benar tersimpan setelah "Simpan Koreksi" di bawah ditekan.</div>
+      ${opnameCorrectNewItems.length===0 ? `<div class="empty-row" style="padding:16px;">Belum ada barang baru yang ditambahkan.</div>` : `
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Barang</th><th>Jenis</th><th>Satuan</th><th class="num">Jumlah Fisik</th><th class="num">Harga Total</th><th></th></tr></thead>
+          <tbody>
+            ${opnameCorrectNewItems.map(ni=>`<tr>
+              <td class="cell-title">${escapeHtml(ni.itemName)}</td>
+              <td>${ni.addedType==='wip' ? 'WIP' : 'Tambahan'}</td>
+              <td>${escapeHtml(ni.uom||'')}</td>
+              <td class="num">${fmtNum(ni.qty)}</td>
+              <td class="num">${fmtIDR(ni.price||0)}</td>
+              <td><button type="button" class="btn btn-sm btn-quiet" title="Hapus" onclick="removeOpnameCorrectNewItem('${ni.itemId}')">${ICONS.trash}</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    </div>` : ''}
     <div class="action-row" style="justify-content:flex-end; gap:8px;">
       <button class="btn btn-outline" onclick="backToOpnameList()">Batal</button>
       <button class="btn btn-primary" onclick="confirmSaveOpnameCorrection()">Simpan Koreksi</button>
     </div>
   `;
+}
+// Which itemIds are already spoken for in this correction screen -- either
+// already part of the locked opname's own items, or already staged as a new
+// addition -- so both "Tambah Barang" and "Tambah Barang WIP" pickers never
+// offer the same item twice.
+function opnameCorrectTakenItemIds(){
+  const detail = opnameCorrectDetail;
+  const taken = new Set((detail && detail.items || []).map(it=>it.itemId));
+  opnameCorrectNewItems.forEach(ni=>taken.add(ni.itemId));
+  return taken;
+}
+function removeOpnameCorrectNewItem(itemId){
+  opnameCorrectNewItems = opnameCorrectNewItems.filter(ni=>ni.itemId!==itemId);
+  render();
+}
+// Tracks whether the Master has manually edited "Harga Total" in the
+// currently-open modal here -- same idea as addItemOpnameHargaTouched on the
+// live-counting "Tambah Barang" modal.
+let addOpnameCorrectItemHargaTouched = false;
+function openAddOpnameCorrectItemModal(){
+  const locationId = state.opnameCorrectLocation;
+  if(!OPNAME_CORRECT_ADD_LOCATIONS.includes(locationId)) return;
+  const taken = opnameCorrectTakenItemIds();
+  // Same WIP-category exclusion as the live-counting "Tambah Barang" modal --
+  // WIP can only be added through "Tambah Barang WIP" below.
+  const available = state.items.filter(i=>!taken.has(i.id) && i.category!=='WIP Kitchen' && i.category!=='WIP Bar').sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  if(available.length===0){
+    toast('Semua barang di Master Data sudah ada di opname ini.', true);
+    return;
+  }
+  const body = `
+    <div id="addOpnameCorrectItemError"></div>
+    <div class="lock-note" style="margin:0 0 12px;">Untuk barang yang ternyata terlewat sama sekali dari hitung fisik ${escapeHtml(whName(locationId))} — ${escapeHtml(periodLabel(state.opnameCorrectPeriod))}. Baru benar-benar tersimpan (dan ikut menyesuaikan stok) setelah "Simpan Koreksi" ditekan.</div>
+    <div class="field"><label>Cari Barang</label><input type="text" id="addOpnameCorrectItemSearch" placeholder="Ketik nama barang…" oninput="filterAddOpnameCorrectItemSelect(this.value)"></div>
+    <div class="field"><label>Barang (${available.length} tersedia)</label><select id="addOpnameCorrectItemSelect" size="8" style="height:auto;" onchange="onAddOpnameCorrectItemSelectChange()">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}${i.category?' — '+escapeHtml(i.category):''}</option>`).join('')}</select></div>
+    <div class="two-col">
+      <div class="field"><label>Jumlah Fisik <span class="cell-sub" id="addOpnameCorrectItemUnitLabel"></span></label><input type="number" id="addOpnameCorrectItemQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="onAddOpnameCorrectItemQtyInput()"></div>
+      <div class="field"><label>Harga Total (opsional)</label><input type="text" inputmode="numeric" id="addOpnameCorrectItemHarga" placeholder="0" oninput="formatPriceInput(this); addOpnameCorrectItemHargaTouched=true;"></div>
+    </div>
+    <div class="cell-sub" style="margin:-8px 0 0;">Harga Total otomatis terisi dari harga terakhir barang × Jumlah Fisik -- ubah kalau nilainya berbeda.</div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddOpnameCorrectItem()">Tambahkan</button>`;
+  openModal('Tambah Barang', body, foot);
+  addOpnameCorrectItemHargaTouched = false;
+  onAddOpnameCorrectItemSelectChange();
+}
+function onAddOpnameCorrectItemSelectChange(){
+  const sel = document.getElementById('addOpnameCorrectItemSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const labelEl = document.getElementById('addOpnameCorrectItemUnitLabel');
+  if(labelEl) labelEl.textContent = item ? ('(' + (srHasSmallUnit(item) ? item.smallUnit : item.uom) + ')') : '';
+  recalcAddOpnameCorrectItemHarga();
+}
+function onAddOpnameCorrectItemQtyInput(){ recalcAddOpnameCorrectItemHarga(); }
+function recalcAddOpnameCorrectItemHarga(){
+  if(addOpnameCorrectItemHargaTouched) return;
+  const sel = document.getElementById('addOpnameCorrectItemSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const hargaEl = document.getElementById('addOpnameCorrectItemHarga');
+  if(!item || !hargaEl) return;
+  const qtyEl = document.getElementById('addOpnameCorrectItemQty');
+  const qty = qtyEl ? (parseFloat(qtyEl.value) || 0) : 0;
+  const physical = srHasSmallUnit(item) ? (qty / item.conversionQty) : qty;
+  const defaultTotal = Math.round(physical * (item.lastPrice||0));
+  hargaEl.value = defaultTotal ? defaultTotal.toLocaleString('id-ID') : '';
+}
+function filterAddOpnameCorrectItemSelect(q){
+  const sel = document.getElementById('addOpnameCorrectItemSelect');
+  if(!sel) return;
+  q = (q||'').toLowerCase();
+  Array.from(sel.options).forEach(opt=>{ opt.style.display = opt.textContent.toLowerCase().includes(q) ? '' : 'none'; });
+}
+function submitAddOpnameCorrectItem(){
+  const sel = document.getElementById('addOpnameCorrectItemSelect');
+  const itemId = sel ? sel.value : '';
+  const qty = parseFloat(document.getElementById('addOpnameCorrectItemQty').value) || 0;
+  const err = document.getElementById('addOpnameCorrectItemError');
+  const item = itemById(itemId);
+  if(!item){ err.innerHTML = errBox('Pilih barang terlebih dahulu.'); return; }
+  if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
+  const hargaEl = document.getElementById('addOpnameCorrectItemHarga');
+  opnameCorrectNewItems.push({
+    itemId, itemName: item.name, kode: item.kode||'', uom: srHasSmallUnit(item) ? item.smallUnit : item.uom,
+    qty, price: hargaEl ? parsePriceInput(hargaEl.value) : 0, addedType: 'goods',
+  });
+  closeModal();
+  render();
+  toast('Barang ditambahkan -- simpan koreksi untuk menerapkannya.');
+}
+// Tracks whether the Master has manually edited "Harga Total" in the
+// currently-open "Tambah Barang WIP" modal here.
+let addOpnameCorrectWipHargaTouched = false;
+function openAddOpnameCorrectWipModal(){
+  const locationId = state.opnameCorrectLocation;
+  const wipCategory = wipCategoryFor(locationId);
+  if(!wipCategory || !OPNAME_CORRECT_ADD_LOCATIONS.includes(locationId)) return;
+  const taken = opnameCorrectTakenItemIds();
+  const available = state.items.filter(i=>i.category===wipCategory && !taken.has(i.id)).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  if(available.length===0){
+    toast('Tidak ada lagi barang berkategori "' + wipCategory + '" yang bisa ditambahkan (semua sudah ada di opname ini).', true);
+    return;
+  }
+  const body = `
+    <div id="addOpnameCorrectWipError"></div>
+    <div class="field"><label>Barang WIP (${escapeHtml(wipCategory)})</label><select id="addOpnameCorrectWipSelect" onchange="onAddOpnameCorrectWipSelectChange()">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}</option>`).join('')}</select></div>
+    <div class="two-col">
+      <div class="field"><label>Jumlah Fisik <span class="cell-sub" id="addOpnameCorrectWipUnitLabel"></span></label><input type="number" id="addOpnameCorrectWipQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="onAddOpnameCorrectWipQtyInput()"></div>
+      <div class="field"><label>Harga Total (opsional)</label><input type="text" inputmode="numeric" id="addOpnameCorrectWipHarga" placeholder="0" oninput="formatPriceInput(this); addOpnameCorrectWipHargaTouched=true;"></div>
+    </div>
+    <div class="cell-sub" style="margin:-8px 0 0;">Harga Total otomatis terisi dari harga terakhir barang × Jumlah Fisik -- ubah kalau nilainya berbeda. Qty WIP tidak memengaruhi stok, hanya nilai tercatat.</div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddOpnameCorrectWip()">Tambahkan</button>`;
+  openModal('Tambah Barang WIP', body, foot);
+  addOpnameCorrectWipHargaTouched = false;
+  onAddOpnameCorrectWipSelectChange();
+}
+function onAddOpnameCorrectWipSelectChange(){
+  const sel = document.getElementById('addOpnameCorrectWipSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const labelEl = document.getElementById('addOpnameCorrectWipUnitLabel');
+  if(labelEl) labelEl.textContent = item ? ('(' + (srHasSmallUnit(item) ? item.smallUnit : item.uom) + ')') : '';
+  recalcAddOpnameCorrectWipHarga();
+}
+function onAddOpnameCorrectWipQtyInput(){ recalcAddOpnameCorrectWipHarga(); }
+function recalcAddOpnameCorrectWipHarga(){
+  if(addOpnameCorrectWipHargaTouched) return;
+  const sel = document.getElementById('addOpnameCorrectWipSelect');
+  const item = sel && sel.value ? itemById(sel.value) : null;
+  const hargaEl = document.getElementById('addOpnameCorrectWipHarga');
+  if(!item || !hargaEl) return;
+  const qtyEl = document.getElementById('addOpnameCorrectWipQty');
+  const qty = qtyEl ? (parseFloat(qtyEl.value) || 0) : 0;
+  const physical = srHasSmallUnit(item) ? (qty / item.conversionQty) : qty;
+  const defaultTotal = Math.round(physical * (item.lastPrice||0));
+  hargaEl.value = defaultTotal ? defaultTotal.toLocaleString('id-ID') : '';
+}
+function submitAddOpnameCorrectWip(){
+  const sel = document.getElementById('addOpnameCorrectWipSelect');
+  const itemId = sel ? sel.value : '';
+  const qty = parseFloat(document.getElementById('addOpnameCorrectWipQty').value) || 0;
+  const err = document.getElementById('addOpnameCorrectWipError');
+  const item = itemById(itemId);
+  if(!item){ err.innerHTML = errBox('Pilih barang WIP terlebih dahulu.'); return; }
+  if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
+  const hargaEl = document.getElementById('addOpnameCorrectWipHarga');
+  opnameCorrectNewItems.push({
+    itemId, itemName: item.name, kode: item.kode||'', uom: srHasSmallUnit(item) ? item.smallUnit : item.uom,
+    qty, price: hargaEl ? parsePriceInput(hargaEl.value) : 0, addedType: 'wip',
+  });
+  closeModal();
+  render();
+  toast('Barang WIP ditambahkan -- simpan koreksi untuk menerapkannya.');
 }
 function confirmSaveOpnameCorrection(){
   const detail = opnameCorrectDetail;
@@ -4226,10 +4450,14 @@ function confirmSaveOpnameCorrection(){
     const newCanonical = (item && srHasSmallUnit(item)) ? (opnameCorrectQty[it.itemId] / item.conversionQty) : opnameCorrectQty[it.itemId];
     return Math.abs((newCanonical||0) - (it.physicalQty||0)) > 0.0001;
   });
-  if(changed.length===0){ toast('Tidak ada perubahan untuk disimpan.'); return; }
+  const newCount = opnameCorrectNewItems.length;
+  if(changed.length===0 && newCount===0){ toast('Tidak ada perubahan untuk disimpan.'); return; }
+  const parts = [];
+  if(changed.length>0) parts.push('mengubah ' + changed.length + ' barang');
+  if(newCount>0) parts.push('menambah ' + newCount + ' barang baru');
   openConfirm(
     'Simpan Koreksi Opname',
-    'Ini akan mengubah ' + changed.length + ' barang pada data opname yang sudah final untuk ' + whName(state.opnameCorrectLocation) + ' — ' + periodLabel(state.opnameCorrectPeriod) + ', dan menyesuaikan stok saat ini sebesar selisihnya saja. Pastikan koreksi ini benar sebelum melanjutkan. Lanjutkan?',
+    'Ini akan ' + parts.join(' dan ') + ' pada data opname yang sudah final untuk ' + whName(state.opnameCorrectLocation) + ' — ' + periodLabel(state.opnameCorrectPeriod) + ', dan menyesuaikan stok saat ini seperlunya. Pastikan koreksi ini benar sebelum melanjutkan. Lanjutkan?',
     ()=>saveOpnameCorrection(),
     'Simpan Koreksi', true
   );
@@ -4276,6 +4504,42 @@ async function saveOpnameCorrection(){
         if(peruntukanValues) peruntukanValues.mix = (peruntukanValues.mix||0) + delta*(it.price||0);
       }
     }
+    // Barang baru (Kitchen/Bar saja, lihat OPNAME_CORRECT_ADD_LOCATIONS) yang
+    // di-stage lewat "Tambah Barang"/"Tambah Barang WIP" di atas -- sama
+    // perlakuannya dengan actionSubmitOpnameCount's 'goods'/'wip' handling:
+    // 'goods' langsung menambah stok (system dianggap 0 karena barang ini
+    // belum pernah tercatat di opname/lokasi ini, jadi delta = qty penuh),
+    // 'wip' hanya menambah Nilai Tercatat tanpa pernah menyentuh stok sama
+    // sekali -- persis seperti alur hitung fisik biasa.
+    let addedGoodsValueDelta = 0, addedWipValueDelta = 0;
+    for(const ni of opnameCorrectNewItems){
+      const item = itemById(ni.itemId);
+      if(!item) continue;
+      const useSmall = srHasSmallUnit(item);
+      const physical = useSmall ? (ni.qty / item.conversionQty) : ni.qty;
+      const value = ni.price!=null ? ni.price : physical * (item.lastPrice||0);
+      if(ni.addedType==='wip') addedWipValueDelta += value;
+      else addedGoodsValueDelta += value;
+      newItems.push({
+        itemId: ni.itemId, itemName: item.name, kode: item.kode||'', uom: item.uom||'',
+        systemQty: 0, physicalQty: physical, selisih: physical,
+        price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: value,
+        addedType: ni.addedType,
+      });
+      if(ni.addedType==='goods'){
+        // OPNAME_CORRECT_ADD_LOCATIONS is Kitchen/Bar only (never a Gudang
+        // Utama), so there's no Peruntukan bucket to pick -- same as the
+        // non-storage branch just above.
+        await adjustStock(locationId, ni.itemId, physical, null, {allowNegative:true});
+        await logTx({
+          type:'opname', status:'completed',
+          itemId: ni.itemId, itemName: item.name, uom: item.uom, qty: Math.abs(physical),
+          toWarehouseId: locationId, toWarehouseName: whName(locationId),
+          note: 'Koreksi Master atas Stok Opname ' + periodLabel(periodKey) + ' (terkunci) — barang terlewat ditambahkan: ' + fmtNum(physical) + ' ' + item.uom,
+        });
+      }
+      // 'wip' tidak pernah menyentuh stok nyata, persis seperti submitAddWip().
+    }
     // totalValue (Nilai Tercatat) includes Tambahan/WIP items' value too, same
     // as actionSubmitOpnameCount -- it's real closing-stock value either way,
     // and excluding it here would silently shrink Nilai Tercatat every time a
@@ -4284,9 +4548,11 @@ async function saveOpnameCorrection(){
     const totalValue = newItems.reduce((s,it)=> s + (it.nilaiFisik||0), 0);
     const systemTotalValue = newItems.reduce((s,it)=> s + (it.systemQty||0)*(it.price||0), 0);
     const totalUsedValue = systemTotalValue - totalValue;
+    const totalAddedGoodsValue = (detail.totalAddedGoodsValue||0) + addedGoodsValueDelta;
+    const totalAddedWipValue = (detail.totalAddedWipValue||0) + addedWipValueDelta;
 
     await db.doc('opnameDetails/' + periodKey + '__' + locationId).update({
-      items: newItems, totalValue, totalUsedValue,
+      items: newItems, totalValue, totalUsedValue, totalAddedGoodsValue, totalAddedWipValue,
       ...(peruntukanValues ? {peruntukanValues} : {}),
       correctedAt: new Date().toISOString(), correctedBy: currentUserName || currentRole().name,
     });
@@ -4298,6 +4564,10 @@ async function saveOpnameCorrection(){
       const mergedValues = { ...(session.locationValues||{}), [locationId]: totalValue };
       const mergedUsed = { ...(session.locationUsedValues||{}), [locationId]: totalUsedValue };
       const patch = { locationValues: mergedValues, locationUsedValues: mergedUsed, updatedAt: new Date().toISOString() };
+      if(addedGoodsValueDelta || addedWipValueDelta){
+        patch.locationAddedGoodsValues = { ...(session.locationAddedGoodsValues||{}), [locationId]: ((session.locationAddedGoodsValues||{})[locationId]||0) + addedGoodsValueDelta };
+        patch.locationAddedWipValues = { ...(session.locationAddedWipValues||{}), [locationId]: ((session.locationAddedWipValues||{})[locationId]||0) + addedWipValueDelta };
+      }
       if(session.status==='selesai'){
         // Periode ini sudah difinalisasi (Net Sales terisi, dipakai Laporan
         // R2/R3/R4) -- groupValues yang didenormalisasi ke sana ikut
@@ -4308,6 +4578,7 @@ async function saveOpnameCorrection(){
       await sessionRef.update(patch);
     }
     delete state.reportOpname.histCache[periodKey]; // Laporan Stock Opname (R1) harus baca ulang, bukan versi lama yang mungkin sudah ke-cache
+    opnameCorrectNewItems = [];
     toast('Koreksi opname ' + whName(locationId) + ' tersimpan.');
     backToOpnameList();
   }catch(err){
@@ -6378,20 +6649,17 @@ function correctReportOpnamePeriod(){
 }
 function setReportOpnameTab(t){
   state.reportOpname.tab = t;
-  if(t==='r2'||t==='r3'){
-    correctReportOpnamePeriod();
-    if(state.reportOpname.period && !state.reportOpname.purchaseCache[state.reportOpname.period] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(state.reportOpname.period);
-  }
   render();
 }
-function setReportOpnameAsOf(v){
-  state.reportOpname.asOf = v;
-  if(!state.reportOpname.histCache[v] && !state.reportOpname.loadingHist) loadHistOpnameDetail(v);
-  render();
-}
+// Loads whatever data the currently-selected shared period is missing (both
+// the per-item snapshot used by R1 and the purchase totals used by R2/R3) --
+// called from renderReportOpname() on every render/tab switch, and again
+// here so a direct call to setReportOpnamePeriod() also kicks off loading
+// right away instead of waiting for the next render.
 function setReportOpnamePeriod(v){
   state.reportOpname.period = v;
-  if(!state.reportOpname.purchaseCache[v] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(v);
+  if(v && !state.reportOpname.histCache[v] && !state.reportOpname.loadingHist) loadHistOpnameDetail(v);
+  if(v && !state.reportOpname.purchaseCache[v] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(v);
   render();
 }
 
@@ -6539,35 +6807,26 @@ function historicalReport1Groups(periodKey){
 }
 function reportOpnameR1Html(){
   // This is a report of LOCKED data, not a live view -- so unlike the running
-  // Stock Opname page, there's no "Stok Saat Ini (Live)" option here. It only
-  // ever lists periods that have already been finalized (net sales entered
-  // and locked), and defaults to the most recently finalized one.
-  const finalizedSessions = state.opnameSessions.filter(s=>s.status==='selesai').sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
-  if(!state.reportOpname.asOf || state.reportOpname.asOf==='live' || !finalizedSessions.some(s=>s.periodKey===state.reportOpname.asOf)){
-    state.reportOpname.asOf = finalizedSessions.length ? finalizedSessions[finalizedSessions.length-1].periodKey : '';
-  }
-  const asOf = state.reportOpname.asOf;
-  let groups = null, ready = true, asOfLabel = '';
-  if(!asOf){
+  // Stock Opname page, there's no "Stok Saat Ini (Live)" option here. The
+  // period itself is now picked once, shared across all 4 report tabs, via
+  // the selector in renderReportOpname() -- this only ever lists periods
+  // that have already been finalized (net sales entered and locked).
+  const finalizedPeriods = finalizedOpnamePeriodOptions();
+  const periodKey = state.reportOpname.period;
+  let groups = null, ready = true, periodLbl = '';
+  if(!periodKey){
     ready = false;
   } else {
-    asOfLabel = 'Stok Opname ' + periodLabel(asOf);
-    if(!state.reportOpname.histCache[asOf]){
+    periodLbl = 'Stok Opname ' + periodLabel(periodKey);
+    if(!state.reportOpname.histCache[periodKey]){
       ready = false;
-      if(!state.reportOpname.loadingHist) loadHistOpnameDetail(asOf);
+      if(!state.reportOpname.loadingHist) loadHistOpnameDetail(periodKey);
     } else {
-      groups = historicalReport1Groups(asOf);
+      groups = historicalReport1Groups(periodKey);
     }
   }
   if(ready && groups){ groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) })); }
   const grandTotal = (ready && groups) ? groups.reduce((s,g)=>s+g.subtotal,0) : 0;
-  const selector = finalizedSessions.length ? `
-    <div class="field" style="margin:0; max-width:320px; flex:1; min-width:220px;">
-      <label>Per Tanggal (As Of)</label>
-      <select onchange="setReportOpnameAsOf(this.value)">
-        ${finalizedSessions.map(s=>`<option value="${s.periodKey}" ${asOf===s.periodKey?'selected':''}>Stok Opname ${periodLabel(s.periodKey)}</option>`).join('')}
-      </select>
-    </div>` : '';
   const sort = state.reportOpname.r1Sort || {field:'default', dir:'asc'};
   const sortArrow = field => sort.field===field
     ? ` <span class="sort-arrow active">${sort.dir==='asc' ? '▲' : '▼'}</span>`
@@ -6576,15 +6835,14 @@ function reportOpnameR1Html(){
   return `
     <div class="panel">
       <div class="panel-head">
-        <h3>Stok Opname${asOfLabel ? ' — ' + escapeHtml(asOfLabel) : ''}</h3>
+        <h3>Stok Opname${periodLbl ? ' — ' + escapeHtml(periodLbl) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
           Total: <b>${fmtIDR(grandTotal)}</b>
           ${reportDownloadBtns(ready && groups && groups.length, 'exportReport1Pdf()', 'exportReport1Excel()')}
         </span>
       </div>
-      ${finalizedSessions.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stok Opname yang difinalisasi. Selesaikan dan kunci Stok Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stok Opname dulu, baru datanya muncul di laporan ini.</div>` : `
+      ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stok Opname yang difinalisasi. Selesaikan dan kunci Stok Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stok Opname dulu, baru datanya muncul di laporan ini.</div>` : `
       <div class="panel-body" style="padding:12px 16px; display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end;">
-        ${selector}
         <div class="field" style="margin:0; max-width:320px; flex:1; min-width:220px;">
           <label>Cari</label>
           <input type="text" id="report1SearchInput" placeholder="Cari barang, kategori, atau penyimpanan…" value="${escapeHtml(state.reportOpname.r1Search||'')}" oninput="setReport1Search(this.value)">
@@ -6639,11 +6897,11 @@ function reportOpnameR1Html(){
 }
 async function exportReport1Excel(){
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
-  const asOf = state.reportOpname.asOf;
-  let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
+  const periodKey = state.reportOpname.period;
+  let groups = historicalReport1Groups(periodKey);
   if(!groups){ toast('Data belum siap, coba lagi sebentar.', true); return; }
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
+  const asOfLabel = 'Stok Opname ' + periodLabel(periodKey);
   const COLS = 8;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
@@ -6691,16 +6949,16 @@ async function exportReport1Excel(){
   totalRows.forEach(r=>xlStyleRow(ws, r, COLS, xlTotalStyle()));
   xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
   XLSXStyle.utils.book_append_sheet(wb, ws, 'Stok Opname');
-  XLSXStyle.writeFile(wb, 'Laporan_Stock_Opname_' + (asOf==='live'?currentPeriodKey():asOf) + '.xlsx');
+  XLSXStyle.writeFile(wb, 'Laporan_Stock_Opname_' + periodKey + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport1Pdf(){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
-  const asOf = state.reportOpname.asOf;
-  let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
+  const periodKey = state.reportOpname.period;
+  let groups = historicalReport1Groups(periodKey);
   if(!groups){ toast('Data belum siap, coba lagi sebentar.', true); return; }
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
+  const asOfLabel = 'Stok Opname ' + periodLabel(periodKey);
   showLoading('Menyiapkan laporan PDF…');
   try{
     const { jsPDF } = window.jspdf;
@@ -6741,7 +6999,7 @@ async function exportReport1Pdf(){
     if(y > pageHeight - 60){ doc.addPage(); y = 50; }
     doc.setFont('helvetica','bold'); doc.setFontSize(11);
     doc.text('GRAND TOTAL: ' + fmtIDR(grand), margin, y);
-    doc.save('Laporan_Stock_Opname_' + (asOf==='live'?currentPeriodKey():asOf) + '.pdf');
+    doc.save('Laporan_Stock_Opname_' + periodKey + '.pdf');
     toast('Laporan PDF berhasil dibuat.');
   }catch(err){
     toast('Gagal membuat laporan PDF: ' + (err && err.message ? err.message : 'terjadi kesalahan'), true);
@@ -6762,7 +7020,7 @@ function report2Rows(periodKey){
   });
 }
 function reportOpnameR2Html(){
-  const finalizedPeriods = correctReportOpnamePeriod();
+  const finalizedPeriods = finalizedOpnamePeriodOptions();
   const periodKey = state.reportOpname.period;
   if(periodKey && !state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
   const rows = periodKey ? report2Rows(periodKey) : [];
@@ -6772,11 +7030,6 @@ function reportOpnameR2Html(){
     if(r.usage!=null) acc.usage += r.usage; else acc.incomplete = true;
     return acc;
   }, {opening:0,purchase:0,closing:0,usage:0,incomplete:false});
-  const periodSelector = `
-    <div class="field" style="margin:0; max-width:280px;">
-      <label>Periode</label>
-      <select onchange="setReportOpnamePeriod(this.value)">${finalizedPeriods.map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
-    </div>`;
   return `
     <div class="panel">
       <div class="panel-head">
@@ -6787,7 +7040,6 @@ function reportOpnameR2Html(){
         </span>
       </div>
       ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stok Opname yang difinalisasi. Selesaikan dan kunci Stok Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stok Opname dulu, baru datanya muncul di laporan ini.</div>` : `
-      <div class="panel-body" style="padding:12px 16px;">${periodSelector}</div>
       ${!purchaseReady ? `<div class="empty-row" style="padding:22px 16px;">Memuat data pembelian periode ini…</div>` : `
       <div class="table-scroll">
         <table>
@@ -6891,17 +7143,12 @@ function report3Rows(periodKey){
   ];
 }
 function reportOpnameR3Html(){
-  const finalizedPeriods = correctReportOpnamePeriod();
+  const finalizedPeriods = finalizedOpnamePeriodOptions();
   const periodKey = state.reportOpname.period;
   if(periodKey && !state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
   const purchaseReady = !!(periodKey && state.reportOpname.purchaseCache[periodKey]);
   const ns = periodKey ? monthlyNetSalesFor(periodKey) : null;
   const rows = periodKey ? report3Rows(periodKey) : [];
-  const periodSelector = `
-    <div class="field" style="margin:0; max-width:280px;">
-      <label>Periode</label>
-      <select onchange="setReportOpnamePeriod(this.value)">${finalizedPeriods.map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
-    </div>`;
   return `
     <div class="panel">
       <div class="panel-head">
@@ -6911,7 +7158,6 @@ function reportOpnameR3Html(){
         </span>
       </div>
       ${finalizedPeriods.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stok Opname yang difinalisasi. Selesaikan dan kunci Stok Opname bulan berjalan (isi Net Sales lalu "Selesaikan Periode Ini") di halaman Stok Opname dulu, baru datanya muncul di laporan ini.</div>` : `
-      <div class="panel-body" style="padding:12px 16px;">${periodSelector}</div>
       <div class="panel-body" style="padding:4px 16px 16px;">
         <div class="cell-sub" style="margin-bottom:8px;">Net Sales diisi manual dari data POS (Raptor) — belum ada integrasi otomatis.</div>
         <div class="two-col">
@@ -6990,7 +7236,7 @@ async function exportReport3Pdf(){
 }
 
 /* ---- Report 4: KPI Ideal Stock ---- */
-function report4Data(){
+function report4Data(periodKey){
   /* Net Sales di sini SENGAJA diambil dari session.netSales (Net Sales
      Bulan Ini yang diisi & dikunci saat finalisasi periode di halaman
      Stok Opname) -- BUKAN dari monthlyNetSalesFor (Net Sales Food +
@@ -6998,8 +7244,12 @@ function report4Data(){
      cuma murni produk makanan/minuman, sedangkan bisnis ini juga punya
      pendapatan sales dari non-food. KPI Ideal Stock butuh total Net
      Sales keseluruhan supaya %Stok vs Sales-nya konsisten dengan yang
-     ada di halaman Stok Opname. */
-  const sessions = state.opnameSessions.filter(s=>s.status==='selesai' && s.groupValues).sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
+     ada di halaman Stok Opname.
+     `periodKey` (now the one shared period picked at the top of Laporan
+     Stok Opname) limits this to that single period -- omit it to get every
+     finalized period back (kept for callers that still want the full trend,
+     if any are ever added back). */
+  const sessions = state.opnameSessions.filter(s=>s.status==='selesai' && s.groupValues && (!periodKey || s.periodKey===periodKey)).sort((a,b)=>a.periodKey.localeCompare(b.periodKey));
   return sessions.map(s=>{
     const hasNs = !!(s.netSales);
     const netSales = hasNs ? Number(s.netSales||0) : 0;
@@ -7009,11 +7259,12 @@ function report4Data(){
   });
 }
 function reportOpnameR4Html(){
-  const data = report4Data();
+  const periodKey = state.reportOpname.period;
+  const data = report4Data(periodKey);
   return `
     <div class="panel">
       <div class="panel-head">
-        <h3>KPI Ideal Stock <span class="cell-sub">(target 10–15% dari Net Sales per bulan)</span></h3>
+        <h3>KPI Ideal Stock${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''} <span class="cell-sub">(target 10–15% dari Net Sales per bulan)</span></h3>
         <span class="panel-total">${reportDownloadBtns(data.length, 'exportReport4Pdf()', 'exportReport4Excel()')}</span>
       </div>
       ${data.length===0 ? `<div class="empty-row" style="padding:22px 16px;">Belum ada periode Stok Opname yang difinalisasi.</div>` : `
@@ -7040,7 +7291,8 @@ function reportOpnameR4Html(){
 }
 async function exportReport4Excel(){
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
-  const data = report4Data();
+  const periodKey = state.reportOpname.period;
+  const data = report4Data(periodKey);
   if(!data.length){ toast('Belum ada data untuk diekspor.', true); return; }
   const COLS = data.length + 1;
   const aoa = [
@@ -7087,18 +7339,19 @@ async function exportReport4Excel(){
   divRows.forEach(r=>xlStyleRow(ws, r, COLS, xlSubheaderStyle()));
   pctRows.forEach(r=>xlStyleRow(ws, r, COLS, xlMetaStyle()));
   XLSXStyle.utils.book_append_sheet(wb, ws, 'KPI Ideal Stock');
-  XLSXStyle.writeFile(wb, 'KPI_Ideal_Stock.xlsx');
+  XLSXStyle.writeFile(wb, 'KPI_Ideal_Stock_' + periodKey + '.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
 async function exportReport4Pdf(){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
-  const data = report4Data();
+  const periodKey = state.reportOpname.period;
+  const data = report4Data(periodKey);
   if(!data.length){ toast('Belum ada data untuk diekspor.', true); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit:'pt', format:'a4', orientation: data.length>5?'landscape':'portrait' });
   const margin = 40; let y = 50;
   doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
-  doc.setFontSize(13); doc.text('KPI Ideal Stock (target 10–15% dari Net Sales)', margin, y); y+=22;
+  doc.setFontSize(13); doc.text('KPI Ideal Stock' + (periodKey?(' — '+periodLabel(periodKey)):'') + ' (target 10–15% dari Net Sales)', margin, y); y+=22;
   const head = [['Indikator', ...data.map(d=>periodLabel(d.periodKey))]];
   const body = [
     ['Total Nilai Stok', ...data.map(d=>fmtIDR(d.totalStock))],
@@ -7117,7 +7370,7 @@ async function exportReport4Pdf(){
     headStyles:{fillColor:[107,63,34], textColor:255},
     didParseCell: function(data2){ if(data2.section==='body' && data2.row.index<=2) data2.cell.styles.fontStyle='bold'; },
   });
-  doc.save('KPI_Ideal_Stock.pdf');
+  doc.save('KPI_Ideal_Stock_' + periodKey + '.pdf');
   toast('Laporan PDF berhasil dibuat.');
 }
 
@@ -7130,11 +7383,11 @@ async function exportReport4Pdf(){
    (report2Rows, report3Rows, report4Data, historicalReport1Groups, dst.)
    tetap dipakai bersama karena itu murni pengambilan data, bukan format. */
 function buildReport1SheetInto(wb){
-  const asOf = state.reportOpname.asOf;
-  let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
+  const periodKey = state.reportOpname.period;
+  let groups = historicalReport1Groups(periodKey);
   if(!groups) return false;
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
+  const asOfLabel = 'Stok Opname ' + periodLabel(periodKey);
   const COLS = 8;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
@@ -7231,7 +7484,7 @@ function buildReport3SheetInto(wb){
   return true;
 }
 function buildReport4SheetInto(wb){
-  const data = report4Data();
+  const data = report4Data(state.reportOpname.period);
   if(!data.length) return false;
   const COLS = data.length + 1;
   const aoa = [
@@ -7280,9 +7533,8 @@ async function exportAllOpnameExcel(){
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   showLoading('Menyiapkan laporan gabungan…');
   try{
-    const asOf = state.reportOpname.asOf;
-    if(asOf && asOf!=='live' && !state.reportOpname.histCache[asOf]) await loadHistOpnameDetail(asOf);
     const periodKey = state.reportOpname.period;
+    if(periodKey && !state.reportOpname.histCache[periodKey]) await loadHistOpnameDetail(periodKey);
     if(periodKey && !state.reportOpname.purchaseCache[periodKey]) await loadPurchasesForPeriod(periodKey);
     const wb = XLSXStyle.utils.book_new();
     const ok1 = buildReport1SheetInto(wb);
@@ -7290,18 +7542,18 @@ async function exportAllOpnameExcel(){
     const ok3 = buildReport3SheetInto(wb);
     const ok4 = buildReport4SheetInto(wb);
     if(!ok1 && !ok2 && !ok3 && !ok4){ toast('Belum ada data untuk diekspor. Buka tiap tab laporan dulu supaya datanya termuat.', true); return; }
-    XLSXStyle.writeFile(wb, 'Laporan_Stok_Opname_Lengkap_' + (periodKey||(asOf==='live'?currentPeriodKey():asOf)||currentPeriodKey()) + '.xlsx');
+    XLSXStyle.writeFile(wb, 'Laporan_Stok_Opname_Lengkap_' + (periodKey||currentPeriodKey()) + '.xlsx');
     toast('Laporan Excel gabungan (4 sheet) berhasil dibuat.');
   }catch(err){
     toast('Gagal membuat laporan Excel gabungan: ' + (err && err.message ? err.message : 'terjadi kesalahan'), true);
   }finally{ hideLoading(); }
 }
 function drawReport1PdfSection(doc, isFirst){
-  const asOf = state.reportOpname.asOf;
-  let groups = asOf==='live' ? liveReport1Groups() : historicalReport1Groups(asOf);
+  const periodKey = state.reportOpname.period;
+  let groups = historicalReport1Groups(periodKey);
   if(!groups) return false;
   groups = filterReport1Groups(groups).map(g=>({ ...g, rows: sortReport1Rows(g.rows, state.reportOpname.r1Sort) }));
-  const asOfLabel = asOf==='live' ? 'Stok Saat Ini' : ('Stok Opname ' + periodLabel(asOf));
+  const asOfLabel = 'Stok Opname ' + periodLabel(periodKey);
   if(!isFirst) doc.addPage();
   const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 40; let y = 50;
@@ -7382,12 +7634,13 @@ function drawReport3PdfSection(doc, isFirst){
   return true;
 }
 function drawReport4PdfSection(doc, isFirst){
-  const data = report4Data();
+  const periodKey = state.reportOpname.period;
+  const data = report4Data(periodKey);
   if(!data.length) return false;
   if(!isFirst) doc.addPage('a4', data.length>5?'landscape':'portrait');
   const margin = 40; let y = 50;
   doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
-  doc.setFontSize(13); doc.text('KPI Ideal Stock (target 10–15% dari Net Sales)', margin, y); y+=22;
+  doc.setFontSize(13); doc.text('KPI Ideal Stock' + (periodKey?(' — '+periodLabel(periodKey)):'') + ' (target 10–15% dari Net Sales)', margin, y); y+=22;
   const head = [['Indikator', ...data.map(d=>periodLabel(d.periodKey))]];
   const body = [
     ['Total Nilai Stok', ...data.map(d=>fmtIDR(d.totalStock))],
@@ -7412,9 +7665,8 @@ async function exportAllOpnamePdf(){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
   showLoading('Menyiapkan laporan PDF gabungan…');
   try{
-    const asOf = state.reportOpname.asOf;
-    if(asOf && asOf!=='live' && !state.reportOpname.histCache[asOf]) await loadHistOpnameDetail(asOf);
     const periodKey = state.reportOpname.period;
+    if(periodKey && !state.reportOpname.histCache[periodKey]) await loadHistOpnameDetail(periodKey);
     if(periodKey && !state.reportOpname.purchaseCache[periodKey]) await loadPurchasesForPeriod(periodKey);
     const { jsPDF } = window.jspdf;
     const doc = new jsPDF({ unit:'pt', format:'a4' });
@@ -7424,7 +7676,7 @@ async function exportAllOpnamePdf(){
     if(drawReport3PdfSection(doc, !any)) any = true;
     if(drawReport4PdfSection(doc, !any)) any = true;
     if(!any){ toast('Belum ada data untuk diekspor. Buka tiap tab laporan dulu supaya datanya termuat.', true); return; }
-    doc.save('Laporan_Stok_Opname_Lengkap_' + (periodKey||(asOf==='live'?currentPeriodKey():asOf)||currentPeriodKey()) + '.pdf');
+    doc.save('Laporan_Stok_Opname_Lengkap_' + (periodKey||currentPeriodKey()) + '.pdf');
     toast('Laporan PDF gabungan berhasil dibuat.');
   }catch(err){
     toast('Gagal membuat laporan PDF gabungan: ' + (err && err.message ? err.message : 'terjadi kesalahan'), true);
@@ -7439,9 +7691,27 @@ function renderReportOpname(){
     {id:'r3', label:'Food & Beverage Cost'},
     {id:'r4', label:'KPI Ideal Stock'},
   ];
+  // One shared period picker for all 4 tabs (and for "Unduh Semua") -- lives
+  // here instead of inside each tab's own render function, and is the single
+  // source of truth for which finalized period every tab/export shows.
+  const finalizedPeriods = correctReportOpnamePeriod();
+  const periodKey = state.reportOpname.period;
+  if(periodKey){
+    if(!state.reportOpname.histCache[periodKey] && !state.reportOpname.loadingHist) loadHistOpnameDetail(periodKey);
+    if(!state.reportOpname.purchaseCache[periodKey] && !state.reportOpname.loadingPurchase) loadPurchasesForPeriod(periodKey);
+  }
+  // Its own row, above the tabs -- not crammed into the tab/download row,
+  // which looked haphazard (the field's label pushed it out of line with the
+  // tab buttons and it could wrap unpredictably next to "Unduh Semua").
+  const periodSelector = finalizedPeriods.length ? `
+    <div class="filter-row" style="margin-bottom:10px; align-items:center;">
+      <label style="font-size:12px; font-weight:600; color:var(--text-secondary);" for="reportOpnamePeriodSelect">Periode</label>
+      <select id="reportOpnamePeriodSelect" style="max-width:220px;" onchange="setReportOpnamePeriod(this.value)">${finalizedPeriods.map(k=>`<option value="${k}" ${periodKey===k?'selected':''}>${periodLabel(k)}</option>`).join('')}</select>
+    </div>` : '';
   const body = tab==='r2' ? reportOpnameR2Html() : tab==='r3' ? reportOpnameR3Html() : tab==='r4' ? reportOpnameR4Html() : reportOpnameR1Html();
   document.getElementById('content').innerHTML = `
-    <div class="filter-row" style="margin-bottom:14px; flex-wrap:wrap;">
+    ${periodSelector}
+    <div class="filter-row" style="margin-bottom:14px; flex-wrap:wrap; align-items:flex-end;">
       ${tabs.map(t=>`<button class="btn btn-sm ${tab===t.id?'btn-primary':'btn-outline'}" onclick="setReportOpnameTab('${t.id}')">${escapeHtml(t.label)}</button>`).join('')}
       <span style="flex:1 1 auto; min-width:8px;"></span>
       <button class="btn btn-sm btn-outline" onclick="exportAllOpnamePdf()">${ICONS.download} Unduh Semua (PDF)</button>
@@ -7518,38 +7788,56 @@ function reportMasukFilteredDocs(){
   }
   return docs.filter(d => inDateRange(d.createdAt, state.reportMasukDateFrom, state.reportMasukDateTo));
 }
+// Unlike the on-screen Laporan Barang Masuk (one row per GR, click to see its
+// items), the downloaded PDF/Excel report is expanded to item level -- same
+// shape as the Penerimaan Barang table (Barang/Lokasi/Jumlah/Satuan/Harga/
+// Total per line, grouped under each GR with a subtotal) -- so the file
+// itself is readable without having to open the app and click into each GR.
 async function exportReportMasukExcel(){
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const docs = reportMasukFilteredDocs();
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
-  const COLS = 5;
+  const COLS = 6;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Barang Masuk'],
     ['Dicetak', fmtDate(new Date().toISOString())],
     [],
-    ['Tanggal','No. Penerimaan','Supplier','Lokasi','Total Nilai'],
+    ['Barang','Lokasi','Jumlah','Satuan','Harga','Total'],
   ];
+  const merges = [ {s:{r:0,c:0}, e:{r:0,c:5}}, {s:{r:1,c:0}, e:{r:1,c:5}} ];
   const headerRowIdx = aoa.length - 1;
+  const docHeaderRows = [];
+  const subtotalRows = [];
   let grand = 0;
   docs.forEach(d=>{
     const first = d.lines[0];
     const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
     grand += total;
-    aoa.push([fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), Math.round(total)]);
+    merges.push({ s:{r:aoa.length,c:0}, e:{r:aoa.length,c:5} });
+    docHeaderRows.push(aoa.length);
+    aoa.push([d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), '', '', '', '', '']);
+    d.lines.forEach(l=>{
+      aoa.push([l.itemName, l.toWarehouseName||'—', l.qty||0, l.uom||'', Math.round(l.price||0), Math.round(l.totalValue||0)]);
+    });
+    subtotalRows.push(aoa.length);
+    aoa.push(['','','','','Subtotal '+d.docNumber, Math.round(total)]);
   });
   const grandTotalRow = aoa.length;
-  aoa.push(['','','','Grand Total', Math.round(grand)]);
+  aoa.push(['','','','','GRAND TOTAL', Math.round(grand)]);
   const wb = XLSXStyle.utils.book_new();
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:4}}, {s:{r:1,c:0}, e:{r:1,c:4}} ];
-  ws['!cols'] = [{wch:18},{wch:16},{wch:26},{wch:20},{wch:16}];
-  xlsxSetColFormats(ws, {4: XLFMT_RP}, headerRowIdx+1);
+  ws['!merges'] = merges;
+  ws['!cols'] = [{wch:28},{wch:18},{wch:12},{wch:9},{wch:14},{wch:16}];
+  xlsxSetQtyColFormats(ws, [2], headerRowIdx+1);
+  xlsxSetColFormats(ws, {4: XLFMT_RP, 5: XLFMT_RP}, headerRowIdx+1);
   xlCell(ws, 0, 0).s = xlTitleStyle(14);
   xlCell(ws, 1, 0).s = xlTitleStyle(11);
   xlStyleRow(ws, 2, 2, xlMetaStyle());
   xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
-  xlStyleBody(ws, headerRowIdx+1, grandTotalRow, COLS, [4]);
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow+1, COLS, [2,4,5]);
+  docHeaderRows.forEach(r=>xlStyleRow(ws, r, COLS, xlSubheaderStyle()));
+  subtotalRows.forEach(r=>xlStyleRow(ws, r, COLS, xlTotalStyle()));
   xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
   XLSXStyle.utils.book_append_sheet(wb, ws, 'Barang Masuk');
   XLSXStyle.writeFile(wb, 'Laporan_Barang_Masuk.xlsx');
@@ -7561,29 +7849,39 @@ async function exportReportMasukPdf(){
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ unit:'pt', format:'a4' });
+  const pageHeight = doc.internal.pageSize.getHeight();
   const margin = 40; let y = 50;
+  const brand = [107,63,34];
   doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
   doc.setFontSize(13); doc.text('Laporan Barang Masuk', margin, y); y+=16;
   doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
-  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=18;
+  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=22;
   doc.setTextColor(0);
   let grand = 0;
-  const body = docs.map(d=>{
+  docs.forEach(d=>{
+    if(y > pageHeight - 140){ doc.addPage(); y = 50; }
     const first = d.lines[0];
     const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
     grand += total;
-    return [fmtDate(d.createdAt), d.docNumber, first.supplierName||'—', docLocationLabel(d.lines), fmtIDR(total)];
+    doc.setFont('helvetica','bold'); doc.setFontSize(10.5);
+    doc.text(d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), margin, y);
+    y += 4;
+    const body = d.lines.map(l=>[l.itemName, l.toWarehouseName||'—', fmtNum(l.qty||0), l.uom||'', fmtIDR(l.price||0), fmtIDR(l.totalValue||0)]);
+    body.push(['', '', '', '', 'Subtotal '+d.docNumber, fmtIDR(total)]);
+    doc.autoTable({
+      startY: y+6, margin:{left:margin, right:margin},
+      head: [['Barang','Lokasi','Jumlah','Satuan','Harga','Total']],
+      body,
+      styles:{fontSize:8, cellPadding:4},
+      headStyles:{fillColor:brand, textColor:255},
+      columnStyles:{2:{halign:'right'},4:{halign:'right'},5:{halign:'right'}},
+      didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
+    });
+    y = doc.lastAutoTable.finalY + 16;
   });
-  body.push(['','','','Grand Total', fmtIDR(grand)]);
-  doc.autoTable({
-    startY: y, margin:{left:margin, right:margin},
-    head: [['Tanggal','No. Penerimaan','Supplier','Lokasi','Total Nilai']],
-    body,
-    styles:{fontSize:9, cellPadding:5},
-    headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{4:{halign:'right'}},
-    didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
-  });
+  if(y > pageHeight - 60){ doc.addPage(); y = 50; }
+  doc.setFont('helvetica','bold'); doc.setFontSize(11);
+  doc.text('GRAND TOTAL: ' + fmtIDR(grand), margin, y);
   doc.save('Laporan_Barang_Masuk.pdf');
   toast('Laporan PDF berhasil dibuat.');
 }
