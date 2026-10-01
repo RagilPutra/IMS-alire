@@ -6788,44 +6788,56 @@ function historicalReport1Groups(periodKey){
     if(!d || !d.items) return [];
     return d.items.map(it=>{
       const master = itemById(it.itemId);
-      /* older opnameDetails saved before peruntukanQty existed: treat the
-         whole counted quantity as Mix Use rather than guessing an allocation. */
-      const rawPeruntukanQty = it.peruntukanQty || { mix: it.physicalQty };
-      // Each peruntukan slice was counted the same (possibly small-unit) way,
-      // so its proportions are still trustworthy even though the absolute
-      // scale might not be -- rescale every slice by the same correction
-      // factor that fixes the item's total, rather than discarding the split.
-      //
-      // rawSum algebraically equals this item's own physicalQty (the live
-      // bucket snapshot taken at submission time, plus the recount delta --
-      // which actionSubmitOpnameCount always dumps into 'mix' for a plain
-      // shrinkage) -- so rawSum lands at/near 0 exactly when the physical
-      // count found NONE of this item. That's the same "Bug Kantong
-      // Peruntukan" as Inventory: the item's old balance is still sitting,
-      // undrawn, in whatever bucket it was allocated to, while the negative
-      // delta in 'mix' exists only to cancel it out on paper. The old code
-      // below ('scale=1' when rawSum<=0) passed those raw buckets through
-      // untouched -- so the stale positive bucket survived as a phantom row
-      // (qty>0.0001 below keeps it) while its exact negative counterpart in
-      // 'mix' was silently dropped (a bucket can't show negative stock) --
-      // net effect, an item the opname says is 0 still "shows up". So: when
-      // the item's own correct total is ~0, every bucket must go to 0 too --
-      // there's nothing left for the old split to mean. When it's genuinely
-      // new stock whose buckets were never allocated at all (rawSum<=0 but
-      // correctTotal>0 -- shouldn't normally happen, but don't silently drop
-      // real value if it does), fall back to Mix Use, same convention as the
-      // pre-peruntukanQty fallback just above.
-      const rawSum = Object.values(rawPeruntukanQty).reduce((s,v)=>s+(v||0), 0);
       const correctTotal = historicalCanonicalQty(it);
-      const peruntukanQty = {};
-      if(correctTotal <= 0.0001){
-        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = 0; });
-      } else if(rawSum > 0.0001){
-        const scale = correctTotal / rawSum;
-        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = (rawPeruntukanQty[k]||0) * scale; });
+      let peruntukanQty;
+      if(!it.peruntukanQty){
+        /* older opnameDetails saved before peruntukanQty existed: treat the
+           whole counted quantity as Mix Use rather than guessing an allocation. */
+        peruntukanQty = { mix: it.physicalQty||0 };
       } else {
-        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = 0; });
-        peruntukanQty.mix = (peruntukanQty.mix||0) + correctTotal;
+        const delta = it.selisih || 0;
+        if(delta < -0.0001 && !it.addedType){
+          // actionSubmitOpnameCount's peruntukanQty, for a plain recount, is
+          // (live bucket snapshot at submission time) with the recount delta
+          // dumped entirely into 'mix' -- always 'mix' here, since the
+          // addedType exception (an explicit Peruntukan on a 'goods' find)
+          // never applies to a reduction (an add always has delta>=0).
+          // Algebraically, that raw split's buckets always sum to exactly
+          // this item's own correctTotal (physical count) -- so simply
+          // rescaling it (the old approach) is a no-op whenever a shrinkage
+          // happened: the stale pre-shrinkage bucket survives untouched
+          // while the offsetting negative 'mix' entry it only exists to
+          // cancel gets silently dropped by buildOpnameReport1Groups's
+          // qty>0.0001 filter (a bucket can't display negative stock) --
+          // net effect, this item's old, already-used-up balance keeps
+          // "showing up" under its old divisi at full value (this is the
+          // same "Bug Kantong Peruntukan" as Inventory's live-stock version).
+          // Fix: undo the dump to recover the pre-recount snapshot, then
+          // scale THAT down from its own total (= systemQty) to correctTotal
+          // -- the same proportional draw-down applyStorageReduction performs
+          // on live stock -- so a bucket that was never actually drawn down
+          // on paper doesn't keep a phantom leftover, and nothing negative is
+          // ever produced to get lost. An increase/no-change delta needs none
+          // of this: its raw buckets are already correct as submitted (the
+          // extra sits in 'mix', nothing stale), so skip straight to the
+          // final branch below for those.
+          const preDeltaBuckets = {};
+          Object.keys(it.peruntukanQty).forEach(k=>{ preDeltaBuckets[k] = it.peruntukanQty[k]||0; });
+          preDeltaBuckets.mix = (preDeltaBuckets.mix||0) - delta;
+          const preDeltaSum = Object.values(preDeltaBuckets).reduce((s,v)=>s+(v||0), 0);
+          peruntukanQty = {};
+          if(correctTotal <= 0.0001){
+            Object.keys(preDeltaBuckets).forEach(k=>{ peruntukanQty[k] = 0; });
+          } else if(preDeltaSum > 0.0001){
+            const scale = correctTotal / preDeltaSum;
+            Object.keys(preDeltaBuckets).forEach(k=>{ peruntukanQty[k] = (preDeltaBuckets[k]||0) * scale; });
+          } else {
+            Object.keys(preDeltaBuckets).forEach(k=>{ peruntukanQty[k] = 0; });
+            peruntukanQty.mix = correctTotal;
+          }
+        } else {
+          peruntukanQty = { ...it.peruntukanQty };
+        }
       }
       return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, peruntukanQty, price: it.price||0 };
     });
