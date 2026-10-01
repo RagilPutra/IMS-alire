@@ -6795,11 +6795,38 @@ function historicalReport1Groups(periodKey){
       // so its proportions are still trustworthy even though the absolute
       // scale might not be -- rescale every slice by the same correction
       // factor that fixes the item's total, rather than discarding the split.
+      //
+      // rawSum algebraically equals this item's own physicalQty (the live
+      // bucket snapshot taken at submission time, plus the recount delta --
+      // which actionSubmitOpnameCount always dumps into 'mix' for a plain
+      // shrinkage) -- so rawSum lands at/near 0 exactly when the physical
+      // count found NONE of this item. That's the same "Bug Kantong
+      // Peruntukan" as Inventory: the item's old balance is still sitting,
+      // undrawn, in whatever bucket it was allocated to, while the negative
+      // delta in 'mix' exists only to cancel it out on paper. The old code
+      // below ('scale=1' when rawSum<=0) passed those raw buckets through
+      // untouched -- so the stale positive bucket survived as a phantom row
+      // (qty>0.0001 below keeps it) while its exact negative counterpart in
+      // 'mix' was silently dropped (a bucket can't show negative stock) --
+      // net effect, an item the opname says is 0 still "shows up". So: when
+      // the item's own correct total is ~0, every bucket must go to 0 too --
+      // there's nothing left for the old split to mean. When it's genuinely
+      // new stock whose buckets were never allocated at all (rawSum<=0 but
+      // correctTotal>0 -- shouldn't normally happen, but don't silently drop
+      // real value if it does), fall back to Mix Use, same convention as the
+      // pre-peruntukanQty fallback just above.
       const rawSum = Object.values(rawPeruntukanQty).reduce((s,v)=>s+(v||0), 0);
       const correctTotal = historicalCanonicalQty(it);
-      const scale = rawSum > 0 ? (correctTotal / rawSum) : 1;
       const peruntukanQty = {};
-      Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = (rawPeruntukanQty[k]||0) * scale; });
+      if(correctTotal <= 0.0001){
+        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = 0; });
+      } else if(rawSum > 0.0001){
+        const scale = correctTotal / rawSum;
+        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = (rawPeruntukanQty[k]||0) * scale; });
+      } else {
+        Object.keys(rawPeruntukanQty).forEach(k=>{ peruntukanQty[k] = 0; });
+        peruntukanQty.mix = (peruntukanQty.mix||0) + correctTotal;
+      }
       return { itemId: it.itemId, name: it.itemName, category: (master&&master.category)||'—', uom: it.uom, peruntukanQty, price: it.price||0 };
     });
   };
