@@ -5118,37 +5118,54 @@ async function submitReassignMix(itemId, warehouseId){
   if(qty > mixQty + 0.0005){ err.innerHTML = errBox('Stok Mix Use tidak cukup. Tersedia: ' + fmtNum(mixQty) + '.'); return; }
   await submitGuarded(err, async ()=>{ await actionReassignMix(itemId, warehouseId, target, qty); });
 }
-async function actionReassignMix(itemId, warehouseId, target, qty, silent){
+async function actionReassignPeruntukan(itemId, warehouseId, source, target, qty, silent){
   const item = itemById(itemId);
   if(!item) throw new Error('Barang tidak ditemukan.');
-  await adjustStock(warehouseId, itemId, -qty, 'mix');
+  await adjustStock(warehouseId, itemId, -qty, source);
   await adjustStock(warehouseId, itemId, qty, target, {allowNegative:true});
   await logTx({
     type:'opname', status:'completed',
     itemId, itemName: item.name, uom: item.uom, qty,
-    note: 'Realokasi Peruntukan manual oleh Master: ' + fmtNum(qty) + ' ' + item.uom + ' dipindah dari Mix Use ke ' + peruntukanName(target) + ' di ' + whName(warehouseId) + ' (total stok tidak berubah).',
+    note: 'Realokasi Peruntukan manual oleh Master: ' + fmtNum(qty) + ' ' + item.uom + ' dipindah dari ' + peruntukanName(source) + ' ke ' + peruntukanName(target) + ' di ' + whName(warehouseId) + ' (total stok tidak berubah).',
   });
   if(!silent) toast(fmtNum(qty) + ' ' + item.uom + ' dipindahkan ke ' + peruntukanName(target) + '.');
 }
+// Thin wrapper kept for the single-item drawer flow (openReassignMixModal /
+// submitReassignMix above), which only ever moves OUT of Mix Use.
+async function actionReassignMix(itemId, warehouseId, target, qty, silent){
+  return actionReassignPeruntukan(itemId, warehouseId, 'mix', target, qty, silent);
+}
 
-/* Bulk alternative to the single-item flow above: lists every (barang,
-   lokasi) pair that currently holds ANY Mix Use stock at a Gudang Utama
-   location, lets Master pick a target Peruntukan per row -- left on
-   "Biarkan di Mix Use" by default, never pre-selected, since there is no
-   reliable way for the system to guess which divisi a given Mix Use
-   balance actually belongs to (the "Saran" text is a hint from recent
-   Permintaan Barang history only, nothing more) -- then applies every row
-   that got a target in one go. Same guarantee as actionReassignMix: only
-   ever moves stock between one item's own buckets at one location, total
-   stock per item/location never changes. This exists so routine Mix Use
-   cleanup doesn't mean opening every item's Inventory drawer one by one. */
+/* Bulk alternative to the single-item flow above. Two modes:
+   - 'mix' (default): lists every (barang, lokasi) pair that currently
+     holds ANY Mix Use stock -- the routine case -- with just a single
+     "Pindahkan ke" per row (source is always Mix Use).
+   - 'all': Master-triggered, meant as a temporary audit mode ("aktifkan
+     dulu, nanti saya matikan lagi") -- lists EVERY (barang, lokasi) pair
+     with ANY Peruntukan stock at all, so Master can manually move stock
+     between ANY two buckets (not just out of Mix Use) while checking
+     things by eye, then switch back to 'mix' mode when done. A search box
+     narrows the (potentially large) full list.
+   Nothing is ever pre-selected in either mode -- there is no reliable way
+   for the system to guess the right bucket on its own (the "Saran" hint
+   in 'mix' mode is a hint from recent Permintaan Barang history only).
+   Same guarantee throughout: only ever moves stock between one item's own
+   buckets at one location, total stock per item/location never changes. */
 let _mixUseReviewRows = [];
-function mixUseReviewRows(){
+let _mixUseReviewMode = 'mix';
+function mixUseReviewRows(mode){
   const rows = [];
   STORAGE_WAREHOUSES.forEach(w=>{
     state.items.forEach(item=>{
-      const qty = stockQtyByPeruntukan(w.id, item.id, 'mix');
-      if(qty > 0.0001) rows.push({warehouseId: w.id, itemId: item.id, itemName: item.name, uom: item.uom||'', qty, value: qty*(item.lastPrice||0)});
+      if(mode==='all'){
+        const buckets = PERUNTUKAN_OPTIONS.map(p=>({id:p.id, name:p.name, qty:stockQtyByPeruntukan(w.id, item.id, p.id)})).filter(b=>b.qty>0.0001);
+        if(buckets.length===0) return;
+        const total = buckets.reduce((s,b)=>s+b.qty,0);
+        rows.push({warehouseId: w.id, itemId: item.id, itemName: item.name, uom: item.uom||'', buckets, value: total*(item.lastPrice||0)});
+      } else {
+        const qty = stockQtyByPeruntukan(w.id, item.id, 'mix');
+        if(qty > 0.0001) rows.push({warehouseId: w.id, itemId: item.id, itemName: item.name, uom: item.uom||'', qty, value: qty*(item.lastPrice||0)});
+      }
     });
   });
   rows.sort((a,b)=> b.value - a.value);
@@ -5169,14 +5186,64 @@ function mixUseRequestHint(itemId){
   if(!division || !division.wh) return null;
   return { peruntukan: division.wh, label: division.name + ' — diminta ' + entries[0][1] + 'x' };
 }
-function openMixUseReviewModal(){
+function openMixUseReviewModal(mode, search){
   if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa membuka ini.', true); return; }
-  const rows = mixUseReviewRows();
-  if(rows.length===0){ toast('Tidak ada barang dengan stok Mix Use saat ini.'); return; }
+  mode = mode || 'mix';
+  search = search || '';
+  const allRows = mixUseReviewRows(mode);
+  const q = search.trim().toLowerCase();
+  const rows = q ? allRows.filter(r=>r.itemName.toLowerCase().includes(q)) : allRows;
   _mixUseReviewRows = rows;
-  const totalValue = rows.reduce((s,r)=>s+r.value,0);
-  const body = `
-    <p class="cell-sub" style="margin-top:0;">${rows.length} barang, total nilai ${fmtIDR(totalValue)} sedang di Mix Use. Pilih Peruntukan untuk barang yang menurut Anda salah alokasi, lalu Terapkan Semua di bawah — baris yang dibiarkan "Biarkan di Mix Use" tidak akan diubah. Total stok tiap barang tidak berubah, hanya kantongnya.</p>
+  _mixUseReviewMode = mode;
+  const totalValue = allRows.reduce((s,r)=>s+r.value,0);
+  const toggleRow = `
+    <div style="display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin-bottom:10px;">
+      <label style="display:flex; align-items:center; gap:6px; font-size:13px; cursor:pointer;">
+        <input type="checkbox" id="mxAllToggle" ${mode==='all'?'checked':''} onchange="openMixUseReviewModal(this.checked ? 'all' : 'mix', document.getElementById('mxSearch') ? document.getElementById('mxSearch').value : '')">
+        Tampilkan semua barang (bukan cuma yang ada Mix Use)
+      </label>
+      <input type="text" id="mxSearch" placeholder="Cari nama barang…" value="${escapeHtml(search)}" style="flex:1; min-width:160px;" oninput="openMixUseReviewModal(_mixUseReviewMode, this.value)">
+    </div>
+  `;
+  const emptyNote = allRows.length===0
+    ? (mode==='all' ? 'Tidak ada barang dengan stok Peruntukan apapun saat ini.' : 'Tidak ada barang dengan stok Mix Use saat ini.')
+    : (rows.length===0 ? 'Tidak ada barang yang cocok dengan pencarian.' : '');
+  const body = mode==='all' ? `
+    ${toggleRow}
+    <p class="cell-sub" style="margin-top:0;">${allRows.length} barang punya stok Peruntukan di Gudang Utama, total nilai ${fmtIDR(totalValue)}. Mode ini untuk cek manual satu-satu -- pilih "Dari" dan "Ke" untuk baris yang mau dipindah, lalu Terapkan Semua. Baris tanpa "Dari"/"Ke" dibiarkan apa adanya. Matikan toggle di atas kalau sudah selesai cek.</p>
+    ${emptyNote ? `<div class="empty-row" style="padding:16px;">${escapeHtml(emptyNote)}</div>` : `
+    <div class="table-scroll" style="max-height:420px;">
+      <table>
+        <thead><tr><th>Barang</th><th>Lokasi</th><th>Alokasi saat ini</th><th>Dari</th><th>Ke</th><th class="num">Jumlah</th></tr></thead>
+        <tbody>
+          ${rows.map((r,idx)=>{
+            const breakdown = r.buckets.map(b=>b.name+' - '+fmtNum(b.qty)).join(' · ');
+            return `<tr>
+              <td class="cell-title">${escapeHtml(r.itemName)}</td>
+              <td>${escapeHtml(whName(r.warehouseId))}</td>
+              <td class="cell-sub">${escapeHtml(breakdown)}</td>
+              <td>
+                <select id="mxFrom${idx}" onchange="mxFromChanged(${idx})">
+                  <option value="">Pilih asal…</option>
+                  ${r.buckets.map(b=>`<option value="${b.id}" data-qty="${b.qty}">${b.name} (${fmtNum(b.qty)})</option>`).join('')}
+                </select>
+              </td>
+              <td>
+                <select id="mxTarget${idx}">
+                  <option value="">Pilih tujuan…</option>
+                  ${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+                </select>
+              </td>
+              <td><input type="number" id="mxQty${idx}" inputmode="decimal" min="0" step="any" style="width:90px;" placeholder="0"></td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`}
+  ` : `
+    ${toggleRow}
+    <p class="cell-sub" style="margin-top:0;">${allRows.length} barang, total nilai ${fmtIDR(totalValue)} sedang di Mix Use. Pilih Peruntukan untuk barang yang menurut Anda salah alokasi, lalu Terapkan Semua di bawah — baris yang dibiarkan "Biarkan di Mix Use" tidak akan diubah. Total stok tiap barang tidak berubah, hanya kantongnya.</p>
+    ${emptyNote ? `<div class="empty-row" style="padding:16px;">${escapeHtml(emptyNote)}</div>` : `
     <div class="table-scroll" style="max-height:420px;">
       <table>
         <thead><tr><th>Barang</th><th>Lokasi</th><th class="num">Mix Use</th><th>Pindahkan ke</th></tr></thead>
@@ -5198,21 +5265,46 @@ function openMixUseReviewModal(){
           }).join('')}
         </tbody>
       </table>
-    </div>
+    </div>`}
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button><button class="btn btn-primary" onclick="confirmApplyMixUseReview()">Terapkan Semua</button>`;
   openModal('Kelola Alokasi Mix Use', body, foot, true);
 }
+// 'all' mode only: when "Dari" changes, default "Jumlah" to that bucket's
+// full current qty (still freely editable) so Master doesn't have to
+// retype the obvious case of "move all of it".
+function mxFromChanged(idx){
+  const fromSel = document.getElementById('mxFrom'+idx);
+  const qtyInput = document.getElementById('mxQty'+idx);
+  if(!fromSel || !qtyInput) return;
+  const opt = fromSel.options[fromSel.selectedIndex];
+  const qty = opt ? parseFloat(opt.getAttribute('data-qty')) : NaN;
+  qtyInput.value = (opt && opt.value && !isNaN(qty)) ? qty : '';
+}
 function confirmApplyMixUseReview(){
   const changes = [];
-  _mixUseReviewRows.forEach((r,idx)=>{
-    const sel = document.getElementById('mxTarget'+idx);
-    if(sel && sel.value) changes.push({itemId:r.itemId, warehouseId:r.warehouseId, target:sel.value, qty:r.qty, itemName:r.itemName, uom:r.uom});
-  });
-  if(changes.length===0){ toast('Belum ada baris yang dipilih targetnya.', true); return; }
+  if(_mixUseReviewMode==='all'){
+    _mixUseReviewRows.forEach((r,idx)=>{
+      const fromSel = document.getElementById('mxFrom'+idx);
+      const targetSel = document.getElementById('mxTarget'+idx);
+      const qtyInput = document.getElementById('mxQty'+idx);
+      const source = fromSel ? fromSel.value : '';
+      const target = targetSel ? targetSel.value : '';
+      const qty = qtyInput ? parseFloat(qtyInput.value) : NaN;
+      if(source && target && source!==target && qty>0){
+        changes.push({itemId:r.itemId, warehouseId:r.warehouseId, source, target, qty, itemName:r.itemName, uom:r.uom});
+      }
+    });
+  } else {
+    _mixUseReviewRows.forEach((r,idx)=>{
+      const sel = document.getElementById('mxTarget'+idx);
+      if(sel && sel.value) changes.push({itemId:r.itemId, warehouseId:r.warehouseId, source:'mix', target:sel.value, qty:r.qty, itemName:r.itemName, uom:r.uom});
+    });
+  }
+  if(changes.length===0){ toast('Belum ada baris yang dipilih/lengkap.', true); return; }
   openConfirm(
-    'Terapkan Realokasi Mix Use',
-    'Ini akan memindahkan ' + changes.length + ' baris dari Mix Use ke Peruntukan yang dipilih. Total stok tiap barang tidak berubah, hanya kantongnya. Lanjutkan?',
+    'Terapkan Realokasi Peruntukan',
+    'Ini akan memindahkan ' + changes.length + ' baris ke Peruntukan yang dipilih. Total stok tiap barang tidak berubah, hanya kantongnya. Lanjutkan?',
     ()=>actionApplyMixUseReview(changes),
     'Terapkan', false
   );
@@ -5223,10 +5315,10 @@ async function actionApplyMixUseReview(changes){
   try{
     for(const c of changes){
       try{
-        const currentMix = stockQtyByPeruntukan(c.warehouseId, c.itemId, 'mix');
-        const qty = Math.min(c.qty, currentMix);
-        if(qty <= 0.0001){ skipped.push({...c, reason:'stok Mix Use sudah berubah/habis sejak daftar ini dibuka'}); continue; }
-        await actionReassignMix(c.itemId, c.warehouseId, c.target, qty, true);
+        const currentSource = stockQtyByPeruntukan(c.warehouseId, c.itemId, c.source);
+        const qty = Math.min(c.qty, currentSource);
+        if(qty <= 0.0001){ skipped.push({...c, reason:'stok ' + peruntukanName(c.source) + ' sudah berubah/habis sejak daftar ini dibuka'}); continue; }
+        await actionReassignPeruntukan(c.itemId, c.warehouseId, c.source, c.target, qty, true);
         applied.push({...c, qty});
       }catch(err){
         skipped.push({...c, reason: (err && err.message) || 'gagal diproses'});
@@ -5235,11 +5327,11 @@ async function actionApplyMixUseReview(changes){
   }finally{
     hideLoading();
   }
-  const rowsHtml = applied.map(r=>`<tr><td>${escapeHtml(r.itemName)}</td><td>${escapeHtml(whName(r.warehouseId))}</td><td style="text-align:right">${fmtNum(r.qty)} ${escapeHtml(r.uom)}</td><td>${peruntukanName(r.target)}</td></tr>`).join('');
+  const rowsHtml = applied.map(r=>`<tr><td>${escapeHtml(r.itemName)}</td><td>${escapeHtml(whName(r.warehouseId))}</td><td style="text-align:right">${fmtNum(r.qty)} ${escapeHtml(r.uom)}</td><td>${peruntukanName(r.source)} → ${peruntukanName(r.target)}</td></tr>`).join('');
   const skipRows = skipped.map(s=>`<li>${escapeHtml(s.itemName)} — ${escapeHtml(whName(s.warehouseId))}: ${escapeHtml(s.reason)}</li>`).join('');
   const body = `
     <p class="cell-sub">Selesai. <b>${applied.length} baris</b> dipindahkan.${skipped.length ? ' ' + skipped.length + ' dilewati.' : ''}</p>
-    ${applied.length ? `<div style="max-height:260px; overflow:auto; border:1px solid var(--border); border-radius:8px;"><table class="table" style="font-size:12px;"><thead><tr><th>Barang</th><th>Lokasi</th><th style="text-align:right">Jumlah</th><th>Ke</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>` : ''}
+    ${applied.length ? `<div style="max-height:260px; overflow:auto; border:1px solid var(--border); border-radius:8px;"><table class="table" style="font-size:12px;"><thead><tr><th>Barang</th><th>Lokasi</th><th style="text-align:right">Jumlah</th><th>Dari → Ke</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>` : ''}
     ${skipped.length ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:12px;">Dilewati:</p><ul style="font-size:12px; color:var(--text-secondary);">${skipRows}</ul>` : ''}
   `;
   openModal('Hasil Realokasi Mix Use', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
