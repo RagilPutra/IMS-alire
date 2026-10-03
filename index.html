@@ -4294,7 +4294,7 @@ function renderOpnameCounting(){
       </div>
       <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang yang ditambahkan manual lewat "Tambah Barang" (ditandai "Tambahan") ikut menyesuaikan stok/inventory sebenarnya begitu opname ini dikunci — jadi basis stok besok — tapi tidak tercatat sebagai Penerimaan Barang.</div>
       ${wipCategory ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang WIP (${escapeHtml(wipCategory)}, ditandai "WIP") tidak pernah masuk lewat Penerimaan Barang dan qty-nya tidak memengaruhi stok/inventory sebenarnya — tapi nilainya tetap dihitung ke Nilai Tercatat lokasi ini.</div>` : ''}
-      ${isStorage ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Selisih hasil hitung di sini dibebankan ke Mix Use, karena opname tidak tahu selisih itu milik alokasi divisi yang mana.</div>` : ''}
+      ${isStorage ? `<div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none;">Barang dihitung total per lokasi (gabungan semua Peruntukan -- lihat kolom Peruntukan di tiap baris), karena stok fisik di rak tidak bisa dipisah per alokasi. Kalau hasil hitung beda dari Stok Sistem, selisihnya dibagi proporsional ke Peruntukan yang sudah ada di barang itu. Mix Use hanya dipakai kalau barang ini belum punya alokasi sama sekali di lokasi ini.</div>` : ''}
       <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Barang yang punya konversi Satuan Kecil dihitung langsung dalam satuan kecil untuk akurasi maksimal.</div>
       <div class="table-scroll">
         <table>
@@ -5107,8 +5107,14 @@ function exportOpnameTemplateAll(){
         'Stok Sistem': Math.round(displayQty*1000)/1000,
         // Kolom info -- rincian Stok Sistem di atas per Peruntukan, cuma
         // untuk dibaca sambil menghitung fisik, TIDAK dibaca ulang saat
-        // import (lihat handleOpnameImportAllFile: selisih hasil opname di
-        // Gudang Utama selalu dibebankan ke Mix Use, sesuai catatan di atas).
+        // import for an EXISTING row (lihat handleOpnameImportAllFile): a
+        // plain recount delta goes through actionSubmitOpnameCount exactly
+        // like the in-app counting page, i.e. split proportionally across
+        // this item's existing Peruntukan buckets (applyStorageIncrease/
+        // applyStorageReduction), never dumped straight into Mix Use. This
+        // column IS read as real input, but only for a genuinely NEW row at
+        // a Gudang Utama location (system stock = 0 here) -- see
+        // isNewAtStorage below.
         'Peruntukan': peruntukanLabel,
         // Sengaja dikosongkan (bukan diisi Stok Sistem) supaya yang menghitung
         // fisik benar-benar mengisi angka hasil hitungannya sendiri, bukan
