@@ -7265,7 +7265,11 @@ async function exportReport1Pdf(){
         const disp = opnameSmallDisplay(itemById(r.itemId), r.qty);
         return [r.no, r.name, r.category||'—', r.penyimpanan, fmtNum(disp.qty), disp.unit||'', fmtIDR(disp.unitPrice), fmtIDR(r.jumlah)];
       });
-      body.push(['', 'Subtotal ' + divisionLabel(g.id), '', '', '', '', '', fmtIDR(g.subtotal)]);
+      // Subtotal label spans every column except the last (colSpan), centered,
+      // instead of sitting alone in the narrow "Item" column where a long
+      // division name wrapped awkwardly -- the amount stays in "Jumlah",
+      // right-aligned same as every data row above it.
+      body.push([{content:'Subtotal ' + divisionLabel(g.id), colSpan:7, styles:{halign:'center'}}, {content: fmtIDR(g.subtotal), styles:{halign:'right'}}]);
       doc.autoTable({
         startY: y+8, margin:{left:margin, right:margin},
         head: [['No','Item','Jenis Bahan Baku','Penyimpanan','Stock Akhir','Satuan','Harga Satuan','Jumlah']],
@@ -7878,7 +7882,11 @@ function drawReport1PdfSection(doc, isFirst){
       const disp = opnameSmallDisplay(itemById(r.itemId), r.qty);
       return [r.no, r.name, r.category||'—', r.penyimpanan, fmtNum(disp.qty), disp.unit||'', fmtIDR(disp.unitPrice), fmtIDR(r.jumlah)];
     });
-    body.push(['', 'Subtotal ' + divisionLabel(g.id), '', '', '', '', '', fmtIDR(g.subtotal)]);
+    // Subtotal label spans every column except the last (colSpan), centered,
+    // instead of sitting alone in the narrow "Item" column where a long
+    // division name wrapped awkwardly -- the amount stays in "Jumlah",
+    // right-aligned same as every data row above it.
+    body.push([{content:'Subtotal ' + divisionLabel(g.id), colSpan:7, styles:{halign:'center'}}, {content: fmtIDR(g.subtotal), styles:{halign:'right'}}]);
     doc.autoTable({
       startY: y+8, margin:{left:margin, right:margin},
       head: [['No','Item','Jenis Bahan Baku','Penyimpanan','Stock Akhir','Satuan','Harga Satuan','Jumlah']],
@@ -8190,7 +8198,11 @@ async function exportReportMasukPdf(){
     doc.text(d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), margin, y);
     y += 4;
     const body = d.lines.map(l=>[l.itemName, l.toWarehouseName||'—', fmtNum(l.qty||0), l.uom||'', fmtIDR(l.price||0), fmtIDR(l.totalValue||0)]);
-    body.push(['', '', '', '', 'Subtotal '+d.docNumber, fmtIDR(total)]);
+    // Subtotal label spans every column except the last (colSpan), centered,
+    // instead of being crammed into the narrow "Harga" column where long text
+    // like "Subtotal GR-000047" wrapped onto two ragged lines -- the amount
+    // stays alone in "Total", right-aligned same as every data row above it.
+    body.push([{content:'Subtotal '+d.docNumber, colSpan:5, styles:{halign:'center'}}, {content: fmtIDR(total), styles:{halign:'right'}}]);
     doc.autoTable({
       startY: y+6, margin:{left:margin, right:margin},
       head: [['Barang','Lokasi','Jumlah','Satuan','Harga','Total']],
@@ -8327,7 +8339,10 @@ async function exportReportKeluarPdf(){
     const item = itemById(l.itemId);
     return [fmtDate(l.createdAt), l.docNumber||'—', l.requestDocNumber||'—', l.fromWarehouseName||'', l.toWarehouseName||'', l.itemName||'', qtyWithSmallNote(l.qty, item, l.uom).replace(/<[^>]*>/g,''), fmtIDR(l.totalValue||0)];
   });
-  body.push(['','','','','','','Grand Total', fmtIDR(grand)]);
+  // Label spans every column except the last (colSpan), centered, instead of
+  // being right-aligned alone in "Jumlah" where "Grand Total" wrapped onto
+  // two lines -- the amount stays alone in "Nilai".
+  body.push([{content:'Grand Total', colSpan:7, styles:{halign:'center'}}, {content: fmtIDR(grand), styles:{halign:'right'}}]);
   doc.autoTable({
     startY: y, margin:{left:margin, right:margin},
     head: [['Tanggal','No. Transfer','No. SR','Dari','Ke','Barang','Jumlah','Nilai']],
@@ -8754,7 +8769,10 @@ function openReceivingModal(editDocNumber){
     }));
   } else {
     if(!canReceive(role)){ toast('Peran ini tidak mencatat Penerimaan Barang.', true); return; }
-    receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'mix', locationId: WAREHOUSES[0].id}];
+    // peruntukan starts BLANK (not defaulted to 'mix') for a brand-new line --
+    // see the comment on grRenderLines' Peruntukan <select> for why: an
+    // unset value must never silently become Mix Use for new stock.
+    receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'', locationId: WAREHOUSES[0].id}];
   }
   grAttachmentFile = null;
   const body = `
@@ -8827,7 +8845,7 @@ function grOnAttachmentChange(input){
 }
 function grAddLine(){
   const lastLocation = receivingLines.length ? receivingLines[receivingLines.length-1].locationId : WAREHOUSES[0].id;
-  receivingLines.push({itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'mix', locationId: lastLocation});
+  receivingLines.push({itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'', locationId: lastLocation});
   grRenderLines();
 }
 function grUpdateLine(idx, field, value){
@@ -8922,12 +8940,17 @@ function grCloseCombo(idx){
 }
 function grRemoveLine(idx){
   receivingLines.splice(idx,1);
-  if(receivingLines.length===0) receivingLines.push({itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'mix', locationId: WAREHOUSES[0].id});
+  if(receivingLines.length===0) receivingLines.push({itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'', locationId: WAREHOUSES[0].id});
   grRenderLines();
 }
 function grUpdateLineLocation(idx, locationId){
   receivingLines[idx].locationId = locationId;
-  if(!isStorageWarehouse(locationId)) receivingLines[idx].peruntukan = 'mix';
+  // Peruntukan only applies at a Gudang Utama location (locked/not-applicable
+  // everywhere else, see grRenderLines). Switching INTO a Gudang Utama
+  // location always clears any previous pick so staff must consciously
+  // re-choose it -- never silently inherit Mix Use or a leftover value from
+  // whatever this line's location used to be.
+  receivingLines[idx].peruntukan = isStorageWarehouse(locationId) ? '' : 'mix';
   grRenderLines();
 }
 function grRenderLines(){
@@ -8959,7 +8982,17 @@ function grRenderLines(){
       <input type="text" inputmode="numeric" id="grPrice${idx}" placeholder="Harga" value="${line.price ? Number(line.price).toLocaleString('id-ID') : ''}" oninput="formatPriceInput(this); grUpdateLine(${idx},'price', parsePriceInput(this.value));" title="Terisi otomatis dari harga master, bisa diedit">
       <select onchange="grUpdateLineLocation(${idx}, this.value)" title="Lokasi Tujuan">${WAREHOUSES.map(w=>`<option value="${w.id}" ${locationId===w.id?'selected':''}>${w.name}</option>`).join('')}</select>
       ${showPeruntukan
-        ? `<select onchange="grUpdateLine(${idx},'peruntukan',this.value)" title="Peruntukan">${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}" ${(line.peruntukan||'mix')===p.id?'selected':''}>${p.name}</option>`).join('')}</select>`
+        ? // No silent "Mix Use" pre-selection here -- an unchosen Peruntukan
+          // shows the disabled "Pilih Peruntukan..." placeholder instead, and
+          // submitReceivingDoc refuses to save until a real choice is made
+          // (Mix Use included, but only if picked on purpose). This is what
+          // keeps Permintaan Barang's item picker (srAvailableItemsPool) from
+          // recommending an item to every division just because nobody
+          // touched the dropdown at receiving time.
+          `<select onchange="grUpdateLine(${idx},'peruntukan',this.value)" title="Peruntukan -- pilih divisi tujuan, atau Mix Use kalau memang untuk dipakai bersama">
+            <option value="" ${!line.peruntukan?'selected':''} disabled>Pilih Peruntukan…</option>
+            ${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}" ${line.peruntukan===p.id?'selected':''}>${p.name}</option>`).join('')}
+          </select>`
         : `<div class="cell-sub" style="padding:9px 0; text-align:center;" title="Peruntukan tidak berlaku, lokasi ini sudah milik satu divisi">Terkunci</div>`}
       <button type="button" class="btn btn-sm btn-quiet" onclick="grRemoveLine(${idx})" title="Hapus baris">${ICONS.trash}</button>
     </div>`;
@@ -9030,6 +9063,18 @@ async function submitReceivingDoc(editDocNumber){
   if(supplierTyped.trim() && !supplierObj){ err.innerHTML = errBox('Pilih supplier dari daftar yang tersedia (klik salah satu saran saat mengetik).'); return; }
   const validLines = receivingLines.filter(l=>l.itemName.trim() && parseFloat(l.qty)>0 && l.locationId);
   if(validLines.length===0){ err.innerHTML = errBox('Tambahkan minimal 1 barang dengan jumlah lebih dari 0.'); return; }
+  // Peruntukan is required for every line going into a Gudang Utama location
+  // (Dry/Cold/Freezer Storage) -- it's what Permintaan Barang's item picker
+  // uses to decide which division is even allowed to request the item
+  // (srAvailableItemsPool). An unset value must never silently fall back to
+  // Mix Use here the way legacy/imported data does elsewhere in the app,
+  // because that's exactly how an item meant for one division (e.g. Kitchen)
+  // quietly becomes requestable by every other division.
+  const missingPeruntukan = validLines.filter(l=>isStorageWarehouse(l.locationId) && !l.peruntukan);
+  if(missingPeruntukan.length){
+    err.innerHTML = errBox('Pilih Peruntukan untuk: ' + missingPeruntukan.map(l=>escapeHtml(l.itemName.trim())).join(', ') + '. Pilih Mix Use kalau barang ini memang untuk dipakai bersama semua divisi.');
+    return;
+  }
   const lines = validLines.map(l=>({
     _txId: l._txId, itemName: l.itemName.trim(), qty: parseFloat(l.qty), uom: (l.uom||'').trim()||'pcs',
     price: parsePriceInput(l.price), category: l.category || (itemByNameLookup(l.itemName)||{}).category || 'Supplies',
