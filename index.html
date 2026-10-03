@@ -3892,6 +3892,7 @@ function renderStokOpname(){
           ${isMaster ? `
           <div style="display:flex; gap:8px;">
             <button class="btn btn-outline btn-sm" onclick="confirmFixMixUseSurplusBug()">${ICONS.wrench||''} Perbaiki Alokasi Peruntukan (Bug Surplus ke Mix Use)</button>
+            <button class="btn btn-outline btn-sm" onclick="openMixUseReviewModal()">${ICONS.wrench||''} Kelola Alokasi Mix Use (Massal)</button>
           </div>
           ` : ''}
         </div>
@@ -4718,14 +4719,33 @@ async function saveOpnameCorrection(){
       const newCanonical = srHasSmallUnit(item) ? (opnameCorrectQty[it.itemId] / item.conversionQty) : opnameCorrectQty[it.itemId];
       const delta = Math.round((newCanonical - (it.physicalQty||0)) * 1000) / 1000;
       if(Math.abs(delta) < 0.0001) continue;
+      // Snapshot the REAL proportional split this correction is about to
+      // write, before writing it -- same pattern actionSubmitOpnameCount
+      // uses (previewStorageReduction/previewStorageIncrease read live
+      // per-bucket stock, so this must run before the write below changes
+      // it). Keeps this document's stored peruntukanQty from drifting away
+      // from live stock -- the old code here always nudged the snapshot's
+      // 'mix' by the WHOLE delta regardless of which bucket(s) the actual
+      // write touched, which is wrong even on the delta<0 branch (that
+      // branch's real write already drew proportionally).
+      const splitForSnapshot = isStorage
+        ? (delta < 0 ? previewStorageReduction(locationId, it.itemId, delta) : previewStorageIncrease(locationId, it.itemId, delta))
+        : null;
       if(isStorage && delta < 0){
         // Same fix as actionSubmitOpnameCount: draw a correction that
         // lowers the count from whichever Peruntukan bucket(s) actually
         // hold the stock, not always 'mix'.
         await applyStorageReduction(locationId, it.itemId, delta);
+      } else if(isStorage && delta > 0){
+        // Same fix as actionSubmitOpnameCount: split a surplus correction
+        // across whichever bucket(s) already hold this item's stock,
+        // instead of always dumping it into Mix Use -- this call site
+        // (Master correcting an already-locked Stok Opname) was missed
+        // when that bug was first fixed elsewhere, and kept silently
+        // re-inflating Mix Use on every upward "Koreksi Opname" since.
+        await applyStorageIncrease(locationId, it.itemId, delta);
       } else {
-        const peruntukan = isStorage ? 'mix' : null;
-        await adjustStock(locationId, it.itemId, delta, peruntukan, {allowNegative:true});
+        await adjustStock(locationId, it.itemId, delta, null, {allowNegative:true});
       }
       await logTx({
         type:'opname', status:'completed',
@@ -4738,9 +4758,11 @@ async function saveOpnameCorrection(){
       it.physicalQty = newCanonical;
       it.selisih = Math.round((newCanonical - (it.systemQty||0)) * 1000) / 1000;
       it.nilaiSelisih = it.selisih * (it.price||0);
-      if(isStorage && it.peruntukanQty){
-        it.peruntukanQty.mix = (it.peruntukanQty.mix||0) + delta;
-        if(peruntukanValues) peruntukanValues.mix = (peruntukanValues.mix||0) + delta*(it.price||0);
+      if(isStorage && it.peruntukanQty && splitForSnapshot){
+        Object.keys(splitForSnapshot).forEach(id=>{ it.peruntukanQty[id] = (it.peruntukanQty[id]||0) + splitForSnapshot[id]; });
+        if(peruntukanValues){
+          Object.keys(splitForSnapshot).forEach(id=>{ peruntukanValues[id] = (peruntukanValues[id]||0) + splitForSnapshot[id]*(it.price||0); });
+        }
       }
     }
     // Barang baru (Kitchen/Bar saja, lihat OPNAME_CORRECT_ADD_LOCATIONS) yang
@@ -5052,6 +5074,175 @@ async function actionFixMixUseSurplusBug(){
     ${skipped.length ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:12px;">Dilewati:</p><ul style="font-size:12px; color:var(--text-secondary);">${skipRows}</ul>` : ''}
   `;
   openModal('Hasil Perbaikan Alokasi Peruntukan (Bug Surplus Mix Use)', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
+}
+
+/* Master-only manual escape hatch: move some/all of an item's Mix Use
+   balance at one Gudang Utama location into a chosen Peruntukan, by hand.
+   Exists alongside confirmFixMixUseSurplusBug() above because that tool can
+   only correct Mix Use that's algorithmically traceable back to a specific
+   buggy Stok Opname recount (i.e. the item already held stock in another
+   bucket right before that opname). It can never do anything for Mix Use
+   that never had another bucket to begin with -- a brand-new item found
+   and added during counting without picking a divisi ("Tambah Barang"),
+   or stock received via Penerimaan Barang where Mix Use was deliberately
+   chosen -- there is nothing to proportionally reconstruct there, only a
+   human call on which divisi it should actually belong to. This is that
+   human call, available from any item's detail drawer. Same total-stock-
+   never-changes guarantee as the automatic tool: it only ever moves stock
+   between this one item's own buckets at this one location. */
+function openReassignMixModal(itemId, warehouseId){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa memindahkan alokasi Peruntukan.', true); return; }
+  const item = itemById(itemId);
+  if(!item) return;
+  const mixQty = stockQtyByPeruntukan(warehouseId, itemId, 'mix');
+  if(mixQty <= 0.0001){ toast('Barang ini sudah tidak punya stok Mix Use di lokasi ini.', true); return; }
+  const targets = PERUNTUKAN_OPTIONS.filter(p=>p.id!=='mix');
+  const body = `
+    <div id="rmError"></div>
+    <p class="cell-sub" style="margin-top:0;">Pindahkan sebagian atau semua stok <b>${escapeHtml(item.name)}</b> di <b>${escapeHtml(whName(warehouseId))}</b> dari Mix Use ke Peruntukan tertentu. Total stok barang di lokasi ini tidak berubah -- cuma kantong Peruntukan-nya.</p>
+    <div class="field"><label>Tersedia di Mix Use</label><div class="cell-sub" style="font-weight:700; color:var(--text); font-size:14px;">${fmtNum(mixQty)} ${escapeHtml(item.uom||'')}</div></div>
+    <div class="two-col">
+      <div class="field"><label>Pindahkan ke</label><select id="rmTarget">${targets.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}</select></div>
+      <div class="field"><label>Jumlah (${escapeHtml(item.uom||'')})</label><input type="number" id="rmQty" inputmode="decimal" min="0" max="${mixQty}" step="any" value="${mixQty}"></div>
+    </div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitReassignMix('${itemId}','${warehouseId}')">Pindahkan</button>`;
+  openModal('Pindahkan dari Mix Use', body, foot);
+}
+async function submitReassignMix(itemId, warehouseId){
+  const err = document.getElementById('rmError');
+  const target = document.getElementById('rmTarget').value;
+  const qty = parseFloat(document.getElementById('rmQty').value);
+  if(!qty || qty<=0){ err.innerHTML = errBox('Jumlah harus lebih dari 0.'); return; }
+  const mixQty = stockQtyByPeruntukan(warehouseId, itemId, 'mix');
+  if(qty > mixQty + 0.0005){ err.innerHTML = errBox('Stok Mix Use tidak cukup. Tersedia: ' + fmtNum(mixQty) + '.'); return; }
+  await submitGuarded(err, async ()=>{ await actionReassignMix(itemId, warehouseId, target, qty); });
+}
+async function actionReassignMix(itemId, warehouseId, target, qty, silent){
+  const item = itemById(itemId);
+  if(!item) throw new Error('Barang tidak ditemukan.');
+  await adjustStock(warehouseId, itemId, -qty, 'mix');
+  await adjustStock(warehouseId, itemId, qty, target, {allowNegative:true});
+  await logTx({
+    type:'opname', status:'completed',
+    itemId, itemName: item.name, uom: item.uom, qty,
+    note: 'Realokasi Peruntukan manual oleh Master: ' + fmtNum(qty) + ' ' + item.uom + ' dipindah dari Mix Use ke ' + peruntukanName(target) + ' di ' + whName(warehouseId) + ' (total stok tidak berubah).',
+  });
+  if(!silent) toast(fmtNum(qty) + ' ' + item.uom + ' dipindahkan ke ' + peruntukanName(target) + '.');
+}
+
+/* Bulk alternative to the single-item flow above: lists every (barang,
+   lokasi) pair that currently holds ANY Mix Use stock at a Gudang Utama
+   location, lets Master pick a target Peruntukan per row -- left on
+   "Biarkan di Mix Use" by default, never pre-selected, since there is no
+   reliable way for the system to guess which divisi a given Mix Use
+   balance actually belongs to (the "Saran" text is a hint from recent
+   Permintaan Barang history only, nothing more) -- then applies every row
+   that got a target in one go. Same guarantee as actionReassignMix: only
+   ever moves stock between one item's own buckets at one location, total
+   stock per item/location never changes. This exists so routine Mix Use
+   cleanup doesn't mean opening every item's Inventory drawer one by one. */
+let _mixUseReviewRows = [];
+function mixUseReviewRows(){
+  const rows = [];
+  STORAGE_WAREHOUSES.forEach(w=>{
+    state.items.forEach(item=>{
+      const qty = stockQtyByPeruntukan(w.id, item.id, 'mix');
+      if(qty > 0.0001) rows.push({warehouseId: w.id, itemId: item.id, itemName: item.name, uom: item.uom||'', qty, value: qty*(item.lastPrice||0)});
+    });
+  });
+  rows.sort((a,b)=> b.value - a.value);
+  return rows;
+}
+// Best-effort only, from the 500 most recent transactions (see
+// nextDocNumber's comment on that cap) -- never authoritative, and never
+// auto-applied on its own; it only ever shows as a text hint next to the
+// dropdown, which Master still has to actively pick.
+function mixUseRequestHint(itemId){
+  const counts = {};
+  state.transactions.forEach(t=>{
+    if(t.type==='request' && t.itemId===itemId && t.divisionId) counts[t.divisionId] = (counts[t.divisionId]||0) + 1;
+  });
+  const entries = Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+  if(entries.length===0) return null;
+  const division = divisionById(entries[0][0]);
+  if(!division || !division.wh) return null;
+  return { peruntukan: division.wh, label: division.name + ' — diminta ' + entries[0][1] + 'x' };
+}
+function openMixUseReviewModal(){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa membuka ini.', true); return; }
+  const rows = mixUseReviewRows();
+  if(rows.length===0){ toast('Tidak ada barang dengan stok Mix Use saat ini.'); return; }
+  _mixUseReviewRows = rows;
+  const totalValue = rows.reduce((s,r)=>s+r.value,0);
+  const body = `
+    <p class="cell-sub" style="margin-top:0;">${rows.length} barang, total nilai ${fmtIDR(totalValue)} sedang di Mix Use. Pilih Peruntukan untuk barang yang menurut Anda salah alokasi, lalu Terapkan Semua di bawah — baris yang dibiarkan "Biarkan di Mix Use" tidak akan diubah. Total stok tiap barang tidak berubah, hanya kantongnya.</p>
+    <div class="table-scroll" style="max-height:420px;">
+      <table>
+        <thead><tr><th>Barang</th><th>Lokasi</th><th class="num">Mix Use</th><th>Pindahkan ke</th></tr></thead>
+        <tbody>
+          ${rows.map((r,idx)=>{
+            const hint = mixUseRequestHint(r.itemId);
+            return `<tr>
+              <td class="cell-title">${escapeHtml(r.itemName)}</td>
+              <td>${escapeHtml(whName(r.warehouseId))}</td>
+              <td class="num">${fmtNum(r.qty)} ${escapeHtml(r.uom)}</td>
+              <td>
+                <select id="mxTarget${idx}">
+                  <option value="">Biarkan di Mix Use</option>
+                  ${PERUNTUKAN_OPTIONS.filter(p=>p.id!=='mix').map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+                </select>
+                ${hint ? `<div class="cell-sub" style="margin-top:2px;">Saran: ${escapeHtml(hint.label)}</div>` : ''}
+              </td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button><button class="btn btn-primary" onclick="confirmApplyMixUseReview()">Terapkan Semua</button>`;
+  openModal('Kelola Alokasi Mix Use', body, foot, true);
+}
+function confirmApplyMixUseReview(){
+  const changes = [];
+  _mixUseReviewRows.forEach((r,idx)=>{
+    const sel = document.getElementById('mxTarget'+idx);
+    if(sel && sel.value) changes.push({itemId:r.itemId, warehouseId:r.warehouseId, target:sel.value, qty:r.qty, itemName:r.itemName, uom:r.uom});
+  });
+  if(changes.length===0){ toast('Belum ada baris yang dipilih targetnya.', true); return; }
+  openConfirm(
+    'Terapkan Realokasi Mix Use',
+    'Ini akan memindahkan ' + changes.length + ' baris dari Mix Use ke Peruntukan yang dipilih. Total stok tiap barang tidak berubah, hanya kantongnya. Lanjutkan?',
+    ()=>actionApplyMixUseReview(changes),
+    'Terapkan', false
+  );
+}
+async function actionApplyMixUseReview(changes){
+  const applied = [], skipped = [];
+  showLoading('Menerapkan realokasi…');
+  try{
+    for(const c of changes){
+      try{
+        const currentMix = stockQtyByPeruntukan(c.warehouseId, c.itemId, 'mix');
+        const qty = Math.min(c.qty, currentMix);
+        if(qty <= 0.0001){ skipped.push({...c, reason:'stok Mix Use sudah berubah/habis sejak daftar ini dibuka'}); continue; }
+        await actionReassignMix(c.itemId, c.warehouseId, c.target, qty, true);
+        applied.push({...c, qty});
+      }catch(err){
+        skipped.push({...c, reason: (err && err.message) || 'gagal diproses'});
+      }
+    }
+  }finally{
+    hideLoading();
+  }
+  const rowsHtml = applied.map(r=>`<tr><td>${escapeHtml(r.itemName)}</td><td>${escapeHtml(whName(r.warehouseId))}</td><td style="text-align:right">${fmtNum(r.qty)} ${escapeHtml(r.uom)}</td><td>${peruntukanName(r.target)}</td></tr>`).join('');
+  const skipRows = skipped.map(s=>`<li>${escapeHtml(s.itemName)} — ${escapeHtml(whName(s.warehouseId))}: ${escapeHtml(s.reason)}</li>`).join('');
+  const body = `
+    <p class="cell-sub">Selesai. <b>${applied.length} baris</b> dipindahkan.${skipped.length ? ' ' + skipped.length + ' dilewati.' : ''}</p>
+    ${applied.length ? `<div style="max-height:260px; overflow:auto; border:1px solid var(--border); border-radius:8px;"><table class="table" style="font-size:12px;"><thead><tr><th>Barang</th><th>Lokasi</th><th style="text-align:right">Jumlah</th><th>Ke</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>` : ''}
+    ${skipped.length ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:12px;">Dilewati:</p><ul style="font-size:12px; color:var(--text-secondary);">${skipRows}</ul>` : ''}
+  `;
+  openModal('Hasil Realokasi Mix Use', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
 }
 
 function openAddWipModal(){
@@ -6352,6 +6543,7 @@ function renderDrawer(){
   if(stock <= 0) statusBadge = '<span class="tag tag-rejected" style="margin-left:8px;">Habis</span>';
   else if(reorder > 0 && stock <= reorder) statusBadge = '<span class="tag tag-pending" style="margin-left:8px;">Rendah</span>';
 
+  const isMasterRole = currentRole().kind === 'master';
   const locs = whsInScope.map(w=>({w, qty: stockQty(w.id, item.id)})).filter(x=>x.qty>0).sort((a,b)=>b.qty-a.qty);
   const priceHistory = getPriceHistory(item.id).slice(0,6);
   const moves = state.transactions.filter(t=>t.itemId===item.id && ['in','transfer','opname'].includes(t.type) && (!scope || scope.includes(t.toWarehouseId) || scope.includes(t.fromWarehouseId))).slice(0,10);
@@ -6390,13 +6582,24 @@ function renderDrawer(){
       ${locs.length===0 ? `<div class="cell-sub">Tidak ada stok di lokasi manapun.</div>` :
         locs.map(x=>{
           let breakdown = '';
+          let mixAction = '';
           if(isStorageWarehouse(x.w.id)){
             const parts = PERUNTUKAN_OPTIONS.map(p=>({name:p.name, qty:stockQtyByPeruntukan(x.w.id, item.id, p.id)})).filter(p=>p.qty>0);
             if(parts.length>0) breakdown = `<div class="cell-sub" style="margin-top:1px;">${parts.map(p=>p.name+' - '+fmtNum(p.qty)).join(' · ')}</div>`;
+            // Master-only escape hatch for Mix Use that was never
+            // retroactively traceable to a bug (e.g. added during Opname
+            // without picking a divisi, or received that way on purpose) --
+            // see openReassignMixModal(). Only shown when there's actually
+            // something in Mix Use to move.
+            const mixQty = stockQtyByPeruntukan(x.w.id, item.id, 'mix');
+            if(isMasterRole && mixQty > 0.0001){
+              mixAction = `<button class="btn btn-sm btn-outline" style="margin-top:6px;" onclick="openReassignMixModal('${item.id}','${x.w.id}')">${ICONS.wrench||''} Pindahkan dari Mix Use</button>`;
+            }
           }
           return `<div class="loc-row-rich">
             <div class="lrr-top"><div class="lrr-name">${x.w.name}</div><div class="lrr-qty">${fmtNum(x.qty)} ${escapeHtml(item.uom||'')}</div></div>
             <div style="display:flex; justify-content:space-between;">${breakdown || '<span></span>'}<div class="lrr-value">${fmtIDR(x.qty*price)}</div></div>
+            ${mixAction}
           </div>`;
         }).join('')}
 
