@@ -3889,6 +3889,11 @@ function renderStokOpname(){
             <button class="btn btn-outline btn-sm" onclick="confirmFixSeptemberOpnameShrinkageBug()">${ICONS.wrench||''} Perbaiki Stok Opname September (Bug Kantong Peruntukan)</button>
           </div>
           ` : ''}
+          ${isMaster ? `
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-outline btn-sm" onclick="confirmFixMixUseSurplusBug()">${ICONS.wrench||''} Perbaiki Alokasi Peruntukan (Bug Surplus ke Mix Use)</button>
+          </div>
+          ` : ''}
         </div>
         ${isPastPeriod ? `<div class="cell-sub" style="margin-top:8px;">Memilih periode selain bulan berjalan — berguna kalau opname dilakukan di awal bulan berikutnya tapi mau tetap dihitung untuk bulan sebelumnya.</div>` : ''}
         ${canOpname ? `<div class="cell-sub" style="margin-top:6px;">1 file mencakup semua lokasi — isi kolom Jumlah Fisik, lalu upload lagi di sini untuk memproses semuanya sekaligus.</div>` : ''}
@@ -4895,6 +4900,160 @@ async function actionFixSeptemberOpnameShrinkageBug(){
   `;
   openModal('Hasil Perbaikan Stok Opname September 2026', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
 }
+
+/* =========================================================
+   MASTER-ONLY REMEDIATION: Stok Opname "Surplus ke Mix Use" bug
+   =========================================================
+   Bug recap (see applyStorageIncrease()/previewStorageIncrease() above):
+   before that fix shipped, every plain Stok Opname recount SURPLUS (fisik
+   lebih besar dari sistem) at a Gudang Utama location was credited wholly
+   to the 'mix' (Mix Use) Peruntukan bucket, no matter which bucket(s) the
+   item's stock actually lived in at the time -- the reason "Mix Use" kept
+   gaining items (and growing, e.g. 42 -> 104) it never should have.
+
+   This tool does NOT change any item's TOTAL stock at a location
+   (stockQty) -- that surplus genuinely arrived and was already correctly
+   added to the total the moment the opname was submitted. It only
+   corrects which BUCKET (Peruntukan) holds it: it moves the mistakenly-
+   Mix-Use'd portion of each past surplus out of 'mix' and into whichever
+   bucket(s) actually held this item's stock right before that opname, in
+   the same proportion previewStorageIncrease() would have used had the
+   fix existed then.
+
+   How the "before" picture is re-traced, with no guessing: a storage
+   opname line's saved peruntukanQty snapshot is, by construction (see
+   previewStorageReduction()'s comment above), always the SAME split that
+   was actually written to live stock at submission time -- so for a line
+   written under the old bug, peruntukanQty already holds the pre-opname
+   per-bucket picture untouched, with the entire surplus (selisih) added
+   on top of peruntukanQty.mix. Subtracting that selisih back out of
+   peruntukanQty.mix therefore recovers exactly the pre-opname per-bucket
+   picture. This is the exact same reconstruction historicalReport1Groups()
+   already relies on for the shrinkage side of this same bug -- applied
+   here to the surplus side, and this time actually applied to live stock
+   (not just redrawn for a report) since the user has approved that.
+
+   Scope and safety:
+   - Only plain recount lines (no addedType) -- a 'goods'/'wip' find always
+     starts from system=0 (nothing anywhere to be proportional to), so it
+     was already correctly all-Mix-Use even under the old code; see
+     actionSubmitOpnameCount().
+   - Only surplus lines (selisih > 0); the shrinkage side of this same bug
+     is the separate, already-existing Sept 2026 tool above.
+   - Only opname periods strictly before MIXUSE_SURPLUS_FIX_CUTOFF_PERIOD,
+     so this can never touch an opname submitted after the proportional-
+     split fix shipped, no matter how many times it's re-run later.
+   - Every correction only ever MOVES stock between this item's own
+     buckets at this one location -- it never changes the item's total
+     stock here, and never touches any other item or location.
+   - Only applied if the live 'mix' bucket for this item/location still
+     holds at least as much as needs to move out right now -- if later
+     activity (a later opname, a later Pemakaian/Permintaan drawing from
+     Mix Use) already used up or moved that stock, the line is skipped and
+     listed rather than forced negative or guessed at.
+   - Safe to re-run: once a line is corrected, the live mix bucket no
+     longer matches what triggered the move, so it's naturally skipped the
+     next time this is run. */
+const MIXUSE_SURPLUS_FIX_CUTOFF_PERIOD = '2026-10';
+function confirmFixMixUseSurplusBug(){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa menjalankan ini.', true); return; }
+  openConfirm(
+    'Perbaiki Alokasi Peruntukan (Bug Surplus ke Mix Use)',
+    'Ini menelusuri ulang SEMUA riwayat Stok Opname sebelum ' + periodLabel(MIXUSE_SURPLUS_FIX_CUTOFF_PERIOD) + ' di Dry/Cold/Freezer Storage, lalu memindahkan bagian surplus yang dulu salah tercatat sebagai Mix Use ke Peruntukan yang seharusnya -- berdasarkan alokasi barang itu persis sebelum opname tsb terjadi. Total stok barang di tiap lokasi TIDAK berubah sama sekali, yang dikoreksi cuma kantong Peruntukan-nya. Barang yang stok Mix Use-nya sudah berkurang/berubah sejak saat itu (misal sudah terpakai) akan dilewati, tidak dipaksa dan tidak dibuat minus. Lanjutkan?',
+    ()=>actionFixMixUseSurplusBug(),
+    'Jalankan Perbaikan', false
+  );
+}
+async function actionFixMixUseSurplusBug(){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa menjalankan ini.', true); return; }
+  const periods = finalizedOpnamePeriodOptions().filter(p=>p < MIXUSE_SURPLUS_FIX_CUTOFF_PERIOD);
+  const locations = STORAGE_WAREHOUSES.map(w=>w.id);
+  const fixed = [];
+  const skipped = [];
+  try{
+    for(const periodKey of periods){
+      for(const locationId of locations){
+        const ref = db.doc('opnameDetails/' + periodKey + '__' + locationId);
+        const snap = await ref.get();
+        if(!snap.exists) continue;
+        const detail = snap.data();
+        const items = detail.items || [];
+        for(const it of items){
+          if(it.addedType) continue;
+          if(!(it.selisih > 0.0005)) continue;
+          if(!it.peruntukanQty) continue; // no point-in-time snapshot this far back -- nothing to re-trace
+          const item = itemById(it.itemId);
+          if(!item){ skipped.push({periodKey, locationId, itemName: it.itemName, reason:'barang sudah tidak ada di Master Barang'}); continue; }
+          // Undo the old bug's dump of the whole surplus into 'mix' to
+          // recover the pre-opname per-bucket picture.
+          const preDelta = {};
+          PERUNTUKAN_OPTIONS.forEach(p=>{ preDelta[p.id] = it.peruntukanQty[p.id]||0; });
+          preDelta.mix = Math.round((preDelta.mix - it.selisih) * 1000) / 1000;
+          // What should have been written had the fix existed then -- the
+          // exact same proportional math as previewStorageIncrease(), just
+          // fed this historical pre-opname snapshot instead of live stock.
+          const buckets = PERUNTUKAN_OPTIONS.map(p=>({id:p.id, qty:preDelta[p.id]||0})).filter(b=>b.qty>0.0005);
+          const bucketTotal = Math.round(buckets.reduce((s,b)=>s+b.qty,0)*1000)/1000;
+          const correctSplit = {};
+          if(bucketTotal<=0.0005){
+            correctSplit.mix = it.selisih; // item had nothing anywhere pre-opname -- mix really was correct
+          } else {
+            let remaining = it.selisih;
+            buckets.forEach((b,i)=>{
+              const isLast = i===buckets.length-1;
+              const share = isLast ? remaining : Math.round((it.selisih*(b.qty/bucketTotal))*1000)/1000;
+              if(share>0.0005) correctSplit[b.id] = share;
+              remaining = Math.round((remaining-share)*1000)/1000;
+            });
+          }
+          // Difference between what actually got written back then (all of
+          // it.selisih into 'mix') and what should have been written --
+          // zero-sum by construction, so it's safe to apply directly as a
+          // set of same-item, same-location bucket-to-bucket moves.
+          const moves = {};
+          PERUNTUKAN_OPTIONS.forEach(p=>{
+            const want = correctSplit[p.id] || 0;
+            const got = p.id==='mix' ? it.selisih : 0;
+            const diff = Math.round((want - got) * 1000) / 1000;
+            if(Math.abs(diff) > 0.0005) moves[p.id] = diff;
+          });
+          const moveOutOfMix = -(moves.mix || 0);
+          if(moveOutOfMix <= 0.0005) continue; // nothing to correct on this line
+          const currentMix = stockQtyByPeruntukan(locationId, it.itemId, 'mix');
+          if(currentMix + 0.0005 < moveOutOfMix){
+            skipped.push({periodKey, locationId, itemName: it.itemName, reason:'stok Mix Use saat ini (' + fmtNum(currentMix) + ' ' + item.uom + ') sudah berubah/kurang dari yang perlu dipindahkan (' + fmtNum(moveOutOfMix) + ' ' + item.uom + ')'});
+            continue;
+          }
+          for(const pid of Object.keys(moves)){
+            await adjustStock(locationId, it.itemId, moves[pid], pid, pid==='mix' ? {} : {allowNegative:true});
+          }
+          const moveDesc = Object.keys(moves).filter(pid=>pid!=='mix').map(pid=>fmtNum(moves[pid]) + ' ' + item.uom + ' → ' + peruntukanName(pid)).join(', ');
+          await logTx({
+            type:'opname', status:'completed',
+            itemId: it.itemId, itemName: it.itemName, uom: item.uom, qty: moveOutOfMix,
+            note: 'Koreksi bug Surplus Stok Opname ke Mix Use (' + periodLabel(periodKey) + ', ' + whName(locationId) + '): ' + moveDesc + ' dipindah dari Mix Use (total stok tidak berubah)',
+          });
+          fixed.push({periodKey, locationId, itemName: it.itemName, moveOutOfMix, moveDesc, valueMoved: moveOutOfMix * (it.price||0)});
+        }
+      }
+    }
+  }catch(err){
+    toast(err.message || 'Gagal menjalankan perbaikan. Coba lagi.', true);
+    return;
+  }
+  const totalValue = fixed.reduce((s,f)=>s+f.valueMoved,0);
+  const rows = fixed.map(f=>`<tr><td>${escapeHtml(periodLabel(f.periodKey))}</td><td>${escapeHtml(whName(f.locationId))}</td><td>${escapeHtml(f.itemName)}</td><td style="text-align:right">${fmtNum(f.moveOutOfMix)}</td><td>${escapeHtml(f.moveDesc)}</td></tr>`).join('');
+  const skipRows = skipped.map(s=>`<li>${escapeHtml(periodLabel(s.periodKey))} — ${escapeHtml(whName(s.locationId))} — ${escapeHtml(s.itemName)}: ${escapeHtml(s.reason)}</li>`).join('');
+  const body = `
+    <p style="font-size:13px; color:var(--text-secondary);">Selesai memeriksa ${periods.length} periode. <b>${fixed.length} baris</b> dikoreksi, total nilai yang dipindahkan dari Mix Use <b>${fmtIDR(totalValue)}</b> (stok total tidak berubah, cuma kantong Peruntukan-nya).${skipped.length ? ' ' + skipped.length + ' baris dilewati (lihat di bawah).' : ''}</p>
+    ${fixed.length ? `<div style="max-height:260px; overflow:auto; border:1px solid var(--border); border-radius:8px;">
+      <table class="table" style="font-size:12px;"><thead><tr><th>Periode</th><th>Lokasi</th><th>Barang</th><th style="text-align:right">Dipindah dari Mix Use</th><th>Ke</th></tr></thead><tbody>${rows}</tbody></table>
+    </div>` : ''}
+    ${skipped.length ? `<p style="font-size:12px; color:var(--text-secondary); margin-top:12px;">Dilewati:</p><ul style="font-size:12px; color:var(--text-secondary);">${skipRows}</ul>` : ''}
+  `;
+  openModal('Hasil Perbaikan Alokasi Peruntukan (Bug Surplus Mix Use)', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
+}
+
 function openAddWipModal(){
   const locationId = state.opnameCountLocation;
   const wipCategory = wipCategoryFor(locationId);
@@ -10464,4 +10623,3 @@ function initSidebarResize(){
 </body>
 </html>
 
-</body></html>
