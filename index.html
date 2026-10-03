@@ -3889,12 +3889,6 @@ function renderStokOpname(){
             <button class="btn btn-outline btn-sm" onclick="confirmFixSeptemberOpnameShrinkageBug()">${ICONS.wrench||''} Perbaiki Stok Opname September (Bug Kantong Peruntukan)</button>
           </div>
           ` : ''}
-          ${isMaster ? `
-          <div style="display:flex; gap:8px;">
-            <button class="btn btn-outline btn-sm" onclick="confirmFixMixUseSurplusBug()">${ICONS.wrench||''} Perbaiki Alokasi Peruntukan (Bug Surplus ke Mix Use)</button>
-            <button class="btn btn-outline btn-sm" onclick="openMixUseReviewModal()">${ICONS.wrench||''} Kelola Alokasi Mix Use (Massal)</button>
-          </div>
-          ` : ''}
         </div>
         ${isPastPeriod ? `<div class="cell-sub" style="margin-top:8px;">Memilih periode selain bulan berjalan — berguna kalau opname dilakukan di awal bulan berikutnya tapi mau tetap dihitung untuk bulan sebelumnya.</div>` : ''}
         ${canOpname ? `<div class="cell-sub" style="margin-top:6px;">1 file mencakup semua lokasi — isi kolom Jumlah Fisik, lalu upload lagi di sini untuk memproses semuanya sekaligus.</div>` : ''}
@@ -5337,6 +5331,113 @@ async function actionApplyMixUseReview(changes){
   openModal('Hasil Realokasi Mix Use', body, `<button class="btn btn-primary" onclick="closeModal()">Tutup</button>`, true);
 }
 
+/* --- Edit Stok (Master-only direct inventory correction) ---
+   Deliberately separate from Penerimaan Barang: this is for fixing the
+   RECORDED number itself (salah input, barang rusak/hilang, hasil cek
+   fisik ad-hoc di luar siklus Stok Opname resmi) -- not for recording
+   stock that actually arrived from a supplier. Writes go through the same
+   adjustStock() primitive everything else uses, but are logged as their
+   own transaction type ('adjustment') instead of 'in', so they never show
+   up in Penerimaan Barang's history/report/PDF (those all filter strictly
+   on type==='in') -- they only ever appear in this item's own "Aktivitas
+   Terbaru" card, labeled "Edit Stok (Master)". Restricted to the Master
+   role specifically (not canEditMaster, which also covers Receiving) --
+   Receiving's reach is Penerimaan Barang, not free-form stock edits. */
+let _adjItemId = null;
+function adjCurrentWarehouseId(){ return (document.getElementById('adjWarehouse')||{}).value || WAREHOUSES[0].id; }
+function openAdjustStockModal(itemId){
+  if(currentRole().kind !== 'master'){ toast('Hanya Master yang bisa mengedit stok langsung.', true); return; }
+  const item = itemById(itemId);
+  if(!item) return;
+  _adjItemId = itemId;
+  const withStock = WAREHOUSES.filter(w=>stockQty(w.id, itemId) > 0.0001);
+  const defaultWh = withStock.length ? withStock[0].id : WAREHOUSES[0].id;
+  const body = `
+    <div id="adjError"></div>
+    <div class="lock-note">Ini mengubah angka stok barang secara langsung -- untuk koreksi cepat (salah input, barang rusak/hilang, hasil cek fisik di luar Stok Opname), BUKAN untuk mencatat barang baru dari supplier (pakai Penerimaan Barang untuk itu). Perubahan ini tercatat di Aktivitas item ini sebagai "Edit Stok (Master)", tidak masuk ke riwayat/laporan Penerimaan Barang.</div>
+    <div class="field"><label>Lokasi</label><select id="adjWarehouse" onchange="adjRefreshCurrent()">${WAREHOUSES.map(w=>`<option value="${w.id}" ${w.id===defaultWh?'selected':''}>${w.name}</option>`).join('')}</select></div>
+    <div class="field" id="adjPeruntukanField"><label>Peruntukan</label>
+      <select id="adjPeruntukan" onchange="adjRefreshDelta()">
+        <option value="">Pilih Peruntukan…</option>
+        ${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+      </select>
+    </div>
+    <div class="cell-sub" id="adjCurrentHint" style="margin-bottom:10px;"></div>
+    <div class="field"><label>Jumlah Baru (${escapeHtml(item.uom||'')})</label><input type="number" id="adjNewQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="adjRefreshDelta()"></div>
+    <div class="cell-sub" id="adjDeltaHint"></div>
+    <div class="field"><label>Alasan / Catatan</label><textarea id="adjNote" placeholder="cth. Hasil cek fisik ulang, barang rusak, salah input sebelumnya, dll"></textarea></div>
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAdjustStock('${itemId}')">Simpan Perubahan</button>`;
+  openModal('Edit Stok — ' + item.name, body, foot, true);
+  adjRefreshCurrent();
+}
+function adjRefreshCurrent(){
+  const whId = adjCurrentWarehouseId();
+  const isStorage = isStorageWarehouse(whId);
+  const field = document.getElementById('adjPeruntukanField');
+  if(field) field.style.display = isStorage ? '' : 'none';
+  adjRefreshDelta();
+}
+function adjRefreshDelta(){
+  const hintCur = document.getElementById('adjCurrentHint');
+  const hintDelta = document.getElementById('adjDeltaHint');
+  const item = itemById(_adjItemId);
+  if(!item || !hintCur || !hintDelta) return;
+  const whId = adjCurrentWarehouseId();
+  const isStorage = isStorageWarehouse(whId);
+  let current = null;
+  if(isStorage){
+    const p = (document.getElementById('adjPeruntukan')||{}).value || '';
+    current = p ? stockQtyByPeruntukan(whId, item.id, p) : null;
+  } else {
+    current = stockQty(whId, item.id);
+  }
+  if(current===null){ hintCur.textContent = 'Pilih Peruntukan dulu untuk melihat stok saat ini.'; hintDelta.textContent=''; return; }
+  hintCur.innerHTML = 'Stok saat ini: <b>' + fmtNum(current) + ' ' + escapeHtml(item.uom||'') + '</b>';
+  const newQtyEl = document.getElementById('adjNewQty');
+  const newQty = newQtyEl ? parseFloat(newQtyEl.value) : NaN;
+  if(isNaN(newQty)){ hintDelta.textContent=''; return; }
+  const delta = Math.round((newQty-current)*1000)/1000;
+  if(Math.abs(delta)<0.0005){ hintDelta.textContent='Tidak ada perubahan.'; return; }
+  hintDelta.innerHTML = (delta>0?'Menambah ':'Mengurangi ') + '<b>' + fmtNum(Math.abs(delta)) + ' ' + escapeHtml(item.uom||'') + '</b>';
+}
+async function submitAdjustStock(itemId){
+  const err = document.getElementById('adjError');
+  const item = itemById(itemId);
+  if(!item){ return; }
+  const whId = adjCurrentWarehouseId();
+  const isStorage = isStorageWarehouse(whId);
+  const peruntukan = isStorage ? ((document.getElementById('adjPeruntukan')||{}).value || '') : null;
+  if(isStorage && !peruntukan){ err.innerHTML = errBox('Pilih Peruntukan terlebih dahulu.'); return; }
+  const newQtyRaw = (document.getElementById('adjNewQty')||{}).value;
+  const newQty = parseFloat(newQtyRaw);
+  if(isNaN(newQty) || newQty < 0){ err.innerHTML = errBox('Isi Jumlah Baru dengan angka 0 atau lebih.'); return; }
+  const note = ((document.getElementById('adjNote')||{}).value||'').trim();
+  if(!note){ err.innerHTML = errBox('Isi Alasan/Catatan untuk perubahan ini.'); return; }
+  await submitGuarded(err, async ()=>{
+    await actionAdjustStock(itemId, whId, peruntukan, newQty, note);
+    toast('Stok ' + item.name + ' berhasil diubah.');
+  });
+}
+async function actionAdjustStock(itemId, warehouseId, peruntukan, newQty, note){
+  if(currentRole().kind !== 'master'){ throw new Error('Hanya Master yang bisa mengedit stok langsung.'); }
+  const item = itemById(itemId);
+  if(!item) throw new Error('Barang tidak ditemukan.');
+  const isStorage = isStorageWarehouse(warehouseId);
+  const current = isStorage ? stockQtyByPeruntukan(warehouseId, itemId, peruntukan) : stockQty(warehouseId, itemId);
+  const delta = Math.round((newQty - current) * 1000) / 1000;
+  if(Math.abs(delta) < 0.0005){ throw new Error('Jumlah baru sama dengan stok saat ini, tidak ada yang diubah.'); }
+  await adjustStock(warehouseId, itemId, delta, isStorage ? peruntukan : null);
+  await logTx({
+    type:'adjustment', status:'completed',
+    itemId, itemName:item.name, uom:item.uom, qty: Math.abs(delta),
+    toWarehouseId: delta>0 ? warehouseId : null, toWarehouseName: delta>0 ? whName(warehouseId) : null,
+    fromWarehouseId: delta<0 ? warehouseId : null, fromWarehouseName: delta<0 ? whName(warehouseId) : null,
+    peruntukan: isStorage ? peruntukan : null,
+    note: 'Edit Stok manual oleh Master' + (isStorage ? ' (' + peruntukanName(peruntukan) + ')' : '') + ' di ' + whName(warehouseId) + ': ' + fmtNum(current) + ' → ' + fmtNum(newQty) + ' ' + item.uom + '. Alasan: ' + note,
+  });
+}
+
 function openAddWipModal(){
   const locationId = state.opnameCountLocation;
   const wipCategory = wipCategoryFor(locationId);
@@ -6280,9 +6381,9 @@ function renderReceiving(){
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Barang</th><th>Lokasi</th><th class="num">Jumlah</th><th>Satuan</th><th class="num">Harga</th><th class="num">Total</th></tr></thead>
+          <thead><tr><th>Barang</th><th>Lokasi</th><th>Peruntukan</th><th class="num">Jumlah</th><th>Satuan</th><th class="num">Harga</th><th class="num">Total</th></tr></thead>
           <tbody>
-            ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="6">Tidak ada penerimaan yang cocok.</td></tr>` :
+            ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="7">Tidak ada penerimaan yang cocok.</td></tr>` :
               pageDocs.map(d=>{
                 const first = d.lines[0];
                 const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
@@ -6291,7 +6392,7 @@ function renderReceiving(){
                 // period summary view belongs to Laporan Barang Masuk instead.
                 return `
                 <tr class="clickable" style="background:var(--surface-2);" onclick="openReceivingDetail('${d.docNumber}')">
-                  <td colspan="6">
+                  <td colspan="7">
                     <div style="display:flex; align-items:center; justify-content:space-between; gap:10px;">
                       <div>
                         <b class="code-mono">${d.docNumber}</b>${first.attachmentId?` <span class="attachment-badge" title="Ada lampiran PDF">${ICONS.paperclip}</span>`:''}
@@ -6307,12 +6408,13 @@ function renderReceiving(){
                 ${d.lines.map(l=>`<tr>
                   <td class="cell-title">${escapeHtml(l.itemName)}</td>
                   <td>${escapeHtml(l.toWarehouseName||'—')}</td>
+                  <td>${isStorageWarehouse(l.toWarehouseId)?peruntukanName(l.peruntukan):'—'}</td>
                   <td class="num">${qtyWithSmallNote(l.qty, itemById(l.itemId), l.uom)}</td>
                   <td>${escapeHtml(l.uom||'')}</td>
                   <td class="num">${fmtIDR(l.price||0)}</td>
                   <td class="num">${fmtIDR(l.totalValue||0)}</td>
                 </tr>`).join('')}
-                <tr><td colspan="5" style="text-align:right;"><b>Subtotal ${d.docNumber}</b></td><td class="num"><b>${fmtIDR(total)}</b></td></tr>
+                <tr><td colspan="6" style="text-align:right;"><b>Subtotal ${d.docNumber}</b></td><td class="num"><b>${fmtIDR(total)}</b></td></tr>
                 `;
               }).join('')}
           </tbody>
@@ -6638,7 +6740,7 @@ function renderDrawer(){
   const isMasterRole = currentRole().kind === 'master';
   const locs = whsInScope.map(w=>({w, qty: stockQty(w.id, item.id)})).filter(x=>x.qty>0).sort((a,b)=>b.qty-a.qty);
   const priceHistory = getPriceHistory(item.id).slice(0,6);
-  const moves = state.transactions.filter(t=>t.itemId===item.id && ['in','transfer','opname'].includes(t.type) && (!scope || scope.includes(t.toWarehouseId) || scope.includes(t.fromWarehouseId))).slice(0,10);
+  const moves = state.transactions.filter(t=>t.itemId===item.id && ['in','transfer','opname','adjustment'].includes(t.type) && (!scope || scope.includes(t.toWarehouseId) || scope.includes(t.fromWarehouseId))).slice(0,10);
 
   box.innerHTML = `
     <div class="drawer-head">
@@ -6670,7 +6772,10 @@ function renderDrawer(){
         <div class="loc-row"><div class="lr-name">Harga per ${escapeHtml(item.smallUnit)}</div><div class="lr-val">${fmtIDR(price/item.conversionQty)}</div></div>
       ` : ''}
 
-      <div class="drawer-section-label">Lokasi (${locs.length})</div>
+      <div class="drawer-section-label" style="display:flex; align-items:center; justify-content:space-between; gap:8px;">
+        <span>Lokasi (${locs.length})</span>
+        ${isMasterRole ? `<button class="btn btn-sm btn-outline" onclick="openAdjustStockModal('${item.id}')">${ICONS.wrench||''} Edit Stok</button>` : ''}
+      </div>
       ${locs.length===0 ? `<div class="cell-sub">Tidak ada stok di lokasi manapun.</div>` :
         locs.map(x=>{
           let breakdown = '';
@@ -6716,18 +6821,19 @@ function renderDrawer(){
       ${moves.length===0 ? `<div class="cell-sub">Belum ada aktivitas.</div>` : moves.map(t=>{
         const isIn = t.type==='in';
         const isOpname = t.type==='opname';
-        const cls = isIn ? 'in' : (isOpname ? 'opname' : 'transfer');
+        const isAdjustment = t.type==='adjustment';
+        const cls = isIn ? 'in' : (isOpname ? 'opname' : (isAdjustment ? 'opname' : 'transfer'));
         const detail = isIn
           ? escapeHtml(t.toWarehouseName||'') + (t.supplierName ? ' · ' + escapeHtml(t.supplierName) : '')
-          : isOpname
+          : (isOpname || isAdjustment)
             ? (t.note ? escapeHtml(t.note) : (t.toWarehouseName ? escapeHtml(t.toWarehouseName) : escapeHtml(t.fromWarehouseName||'')))
             : escapeHtml(t.fromWarehouseName||'') + ' → ' + escapeHtml(t.toWarehouseName||'');
-        const openFn = isIn ? `openReceivingDetail('${t.docNumber}')` : (isOpname ? '' : `openTransferDetail('${t.docNumber}')`);
-        const signed = isIn ? '+' : (isOpname ? (t.toWarehouseId ? '+' : '-') : '');
+        const openFn = isIn ? `openReceivingDetail('${t.docNumber}')` : ((isOpname || isAdjustment) ? '' : `openTransferDetail('${t.docNumber}')`);
+        const signed = isIn ? '+' : ((isOpname || isAdjustment) ? (t.toWarehouseId ? '+' : '-') : '');
         return `<div class="drawer-activity-row ${openFn?'clickable':''}" ${openFn?`onclick="${openFn}"`:''}>
           <div class="da-dot ${cls}"></div>
           <div class="da-body">
-            <div class="da-type ${cls}">${isIn?'Barang Masuk':(isOpname?'Stok Opname':'Transfer')} ${(!isOpname && t.docNumber)?'· '+t.docNumber:''}</div>
+            <div class="da-type ${cls}">${isIn?'Barang Masuk':(isOpname?'Stok Opname':(isAdjustment?'Edit Stok (Master)':'Transfer'))} ${(!isOpname && !isAdjustment && t.docNumber)?'· '+t.docNumber:''}</div>
             <div class="da-detail">${detail} · ${fmtRelative(t.createdAt)}</div>
           </div>
           <div class="da-qty ${cls}">${signed}${fmtNum(t.qty)} ${escapeHtml(t.uom||'')}</div>
@@ -8685,15 +8791,15 @@ async function exportReportMasukExcel(){
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
   const docs = reportMasukFilteredDocs();
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
-  const COLS = 6;
+  const COLS = 7;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
     ['Laporan Barang Masuk'],
     ['Dicetak', fmtDate(new Date().toISOString())],
     [],
-    ['Barang','Lokasi','Jumlah','Satuan','Harga','Total'],
+    ['Barang','Lokasi','Peruntukan','Jumlah','Satuan','Harga','Total'],
   ];
-  const merges = [ {s:{r:0,c:0}, e:{r:0,c:5}}, {s:{r:1,c:0}, e:{r:1,c:5}} ];
+  const merges = [ {s:{r:0,c:0}, e:{r:0,c:6}}, {s:{r:1,c:0}, e:{r:1,c:6}} ];
   const headerRowIdx = aoa.length - 1;
   const docHeaderRows = [];
   const subtotalRows = [];
@@ -8702,28 +8808,28 @@ async function exportReportMasukExcel(){
     const first = d.lines[0];
     const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
     grand += total;
-    merges.push({ s:{r:aoa.length,c:0}, e:{r:aoa.length,c:5} });
+    merges.push({ s:{r:aoa.length,c:0}, e:{r:aoa.length,c:6} });
     docHeaderRows.push(aoa.length);
-    aoa.push([d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), '', '', '', '', '']);
+    aoa.push([d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), '', '', '', '', '', '']);
     d.lines.forEach(l=>{
-      aoa.push([l.itemName, l.toWarehouseName||'—', l.qty||0, l.uom||'', Math.round(l.price||0), Math.round(l.totalValue||0)]);
+      aoa.push([l.itemName, l.toWarehouseName||'—', isStorageWarehouse(l.toWarehouseId)?peruntukanName(l.peruntukan):'—', l.qty||0, l.uom||'', Math.round(l.price||0), Math.round(l.totalValue||0)]);
     });
     subtotalRows.push(aoa.length);
-    aoa.push(['','','','','Subtotal '+d.docNumber, Math.round(total)]);
+    aoa.push(['','','','','','Subtotal '+d.docNumber, Math.round(total)]);
   });
   const grandTotalRow = aoa.length;
-  aoa.push(['','','','','GRAND TOTAL', Math.round(grand)]);
+  aoa.push(['','','','','','GRAND TOTAL', Math.round(grand)]);
   const wb = XLSXStyle.utils.book_new();
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
-  ws['!cols'] = [{wch:28},{wch:18},{wch:12},{wch:9},{wch:14},{wch:16}];
-  xlsxSetQtyColFormats(ws, [2], headerRowIdx+1);
-  xlsxSetColFormats(ws, {4: XLFMT_RP, 5: XLFMT_RP}, headerRowIdx+1);
+  ws['!cols'] = [{wch:28},{wch:18},{wch:14},{wch:12},{wch:9},{wch:14},{wch:16}];
+  xlsxSetQtyColFormats(ws, [3], headerRowIdx+1);
+  xlsxSetColFormats(ws, {5: XLFMT_RP, 6: XLFMT_RP}, headerRowIdx+1);
   xlCell(ws, 0, 0).s = xlTitleStyle(14);
   xlCell(ws, 1, 0).s = xlTitleStyle(11);
   xlStyleRow(ws, 2, 2, xlMetaStyle());
   xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
-  xlStyleBody(ws, headerRowIdx+1, grandTotalRow+1, COLS, [2,4,5]);
+  xlStyleBody(ws, headerRowIdx+1, grandTotalRow+1, COLS, [3,5,6]);
   docHeaderRows.forEach(r=>xlStyleRow(ws, r, COLS, xlSubheaderStyle()));
   subtotalRows.forEach(r=>xlStyleRow(ws, r, COLS, xlTotalStyle()));
   xlStyleRow(ws, grandTotalRow, COLS, xlTotalStyle());
@@ -8731,54 +8837,86 @@ async function exportReportMasukExcel(){
   XLSXStyle.writeFile(wb, 'Laporan_Barang_Masuk.xlsx');
   toast('Laporan Excel berhasil dibuat.');
 }
+/* Rebuilt from scratch after repeated "berantakan" feedback. The old version
+   called doc.autoTable() ONCE PER GR DOCUMENT -- 46 documents meant 46
+   separate little tables, each repeating its own full header row, each
+   free to reflow/paginate independently, with doc-number captions drawn as
+   loose text above every table instead of being part of it. That's what
+   actually read as messy on a long report, not any single column's width.
+   This version builds ONE continuous body array for every line across every
+   filtered document and hands it to a SINGLE autoTable call -- the header
+   prints once and auto-repeats on page breaks (autoTable's own default),
+   each GR's heading and subtotal are ordinary full-width rows INSIDE that
+   one table so nothing can drift out of alignment with the columns below
+   it, and Peruntukan now travels with every line the same way it already
+   does in the on-screen Penerimaan Barang table and the GR detail view.
+   Landscape instead of portrait: 6 columns was already a tight fit in
+   portrait's ~515pt usable width with fixed cellWidths (no slack for a 7th
+   Peruntukan column without shrinking text past comfortable reading size). */
 async function exportReportMasukPdf(){
   if(!window.jspdf){ toast('Library PDF belum siap termuat, coba lagi sebentar.', true); return; }
   const docs = reportMasukFilteredDocs();
   if(!docs.length){ toast('Tidak ada data untuk diekspor.', true); return; }
   const { jsPDF } = window.jspdf;
-  const doc = new jsPDF({ unit:'pt', format:'a4' });
-  const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 40; let y = 50;
+  const doc = new jsPDF({ unit:'pt', format:'a4', orientation:'landscape' });
+  const margin = 40;
   const brand = [107,63,34];
+  const headerFill = [238,231,219];
+  let y = 50;
   doc.setFont('helvetica','bold'); doc.setFontSize(16); doc.text('ALIRE SAJIAN NUSANTARA', margin, y); y+=20;
   doc.setFontSize(13); doc.text('Laporan Barang Masuk', margin, y); y+=16;
   doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110);
-  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=22;
+  doc.text('Dicetak: ' + fmtDate(new Date().toISOString()), margin, y); y+=10;
   doc.setTextColor(0);
+
+  const COLS = 7;
+  const body = [];
   let grand = 0;
   docs.forEach(d=>{
-    if(y > pageHeight - 140){ doc.addPage(); y = 50; }
     const first = d.lines[0];
     const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
     grand += total;
-    doc.setFont('helvetica','bold'); doc.setFontSize(10.5);
-    doc.text(d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''), margin, y);
-    y += 4;
-    const body = d.lines.map(l=>[l.itemName, l.toWarehouseName||'—', fmtNum(l.qty||0), l.uom||'', fmtIDR(l.price||0), fmtIDR(l.totalValue||0)]);
-    // Subtotal label spans every column except the last (colSpan), centered,
-    // instead of being crammed into the narrow "Harga" column where long text
-    // like "Subtotal GR-000047" wrapped onto two ragged lines -- the amount
-    // stays alone in "Total", right-aligned same as every data row above it.
-    body.push([{content:'Subtotal '+d.docNumber, colSpan:5, styles:{halign:'center'}}, {content: fmtIDR(total), styles:{halign:'right'}}]);
-    doc.autoTable({
-      startY: y+6, margin:{left:margin, right:margin},
-      head: [['Barang','Lokasi','Jumlah','Satuan','Harga','Total']],
-      body,
-      styles:{fontSize:8, cellPadding:4},
-      headStyles:{fillColor:brand, textColor:255},
-      // Fixed widths, identical on every pass of this per-GR-document loop --
-      // this is the exact table behind the "urutan/kolom ngaco" complaint:
-      // without a fixed width, "Barang" auto-sizes to each GR's own longest
-      // item name, so Jumlah/Satuan/Harga/Total shift sideways from one GR
-      // block to the next as the page scrolls.
-      columnStyles:{0:{cellWidth:160},1:{cellWidth:110},2:{halign:'right',cellWidth:55},3:{cellWidth:45},4:{halign:'right',cellWidth:70},5:{halign:'right',cellWidth:75}},
-      didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
+    body.push([{
+      content: d.docNumber + ' — ' + fmtDate(d.createdAt) + ' · ' + (first.supplierName||'Tanpa Supplier') + (first.doNumber ? ' · DO '+first.doNumber : ''),
+      colSpan: COLS,
+      styles: {fontStyle:'bold', fillColor:headerFill, textColor:brand, fontSize:9},
+    }]);
+    d.lines.forEach(l=>{
+      body.push([
+        l.itemName, l.toWarehouseName||'—',
+        isStorageWarehouse(l.toWarehouseId)?peruntukanName(l.peruntukan):'—',
+        fmtNum(l.qty||0), l.uom||'', fmtIDR(l.price||0), fmtIDR(l.totalValue||0),
+      ]);
     });
-    y = doc.lastAutoTable.finalY + 16;
+    // Label spans every column except the last (colSpan), centered, so long
+    // text like "Subtotal GR-000047" never wraps into a cramped narrow cell
+    // -- the amount stays alone in "Total", right-aligned like data rows.
+    body.push([
+      {content:'Subtotal '+d.docNumber, colSpan:COLS-1, styles:{halign:'center', fontStyle:'bold'}},
+      {content: fmtIDR(total), styles:{halign:'right', fontStyle:'bold'}},
+    ]);
   });
-  if(y > pageHeight - 60){ doc.addPage(); y = 50; }
-  doc.setFont('helvetica','bold'); doc.setFontSize(11);
-  doc.text('GRAND TOTAL: ' + fmtIDR(grand), margin, y);
+  body.push([
+    {content:'GRAND TOTAL', colSpan:COLS-1, styles:{halign:'center', fontStyle:'bold', fillColor:[230,220,200]}},
+    {content: fmtIDR(grand), styles:{halign:'right', fontStyle:'bold', fillColor:[230,220,200]}},
+  ]);
+
+  doc.autoTable({
+    startY: y+10, margin:{left:margin, right:margin},
+    head: [['Barang','Lokasi','Peruntukan','Jumlah','Satuan','Harga','Total']],
+    body,
+    styles:{fontSize:8.5, cellPadding:4, overflow:'linebreak'},
+    headStyles:{fillColor:brand, textColor:255, fontStyle:'bold'},
+    // Fixed widths add up to well under landscape's ~762pt usable width
+    // (761.89 = 841.89 page - 40*2 margins), with slack left over on
+    // purpose so nothing is fighting for space the way the old 6-column
+    // portrait table was (515pt of columns in ~515.28pt available).
+    columnStyles:{
+      0:{cellWidth:230}, 1:{cellWidth:120}, 2:{cellWidth:95},
+      3:{halign:'right',cellWidth:55}, 4:{cellWidth:55},
+      5:{halign:'right',cellWidth:95}, 6:{halign:'right',cellWidth:100},
+    },
+  });
   doc.save('Laporan_Barang_Masuk.pdf');
   toast('Laporan PDF berhasil dibuat.');
 }
