@@ -1695,6 +1695,71 @@ async function applyStorageReduction(warehouseId, itemId, reduceQty){
     remaining = Math.round((remaining - share) * 1000) / 1000;
   }
 }
+/* Synchronous, side-effect-free preview of exactly what applyStorageReduction()
+   above would write -- same proportional math, returned as a {peruntukan:
+   signedQty} map instead of actually adjusting stock. Exists so Stok Opname's
+   point-in-time Peruntukan snapshot (peruntukanQty, built in
+   actionSubmitOpnameCount before any writes happen) can show the real
+   per-bucket split instead of a guess, without duplicating the proportional
+   logic somewhere that could drift out of sync with the real writer. Keep
+   this in lockstep with applyStorageReduction() if that one ever changes. */
+function previewStorageReduction(warehouseId, itemId, reduceQty){
+  reduceQty = Math.round(Math.abs(reduceQty) * 1000) / 1000;
+  if(reduceQty <= 0.0005) return {};
+  const buckets = PERUNTUKAN_OPTIONS
+    .map(p=>({ id: p.id, qty: stockQtyByPeruntukan(warehouseId, itemId, p.id) }))
+    .filter(b=>b.qty > 0.0005);
+  const bucketTotal = Math.round(buckets.reduce((s,b)=>s+b.qty, 0) * 1000) / 1000;
+  if(bucketTotal <= 0.0005) return { mix: -reduceQty };
+  let remaining = Math.min(reduceQty, bucketTotal);
+  const out = {};
+  for(let i=0;i<buckets.length;i++){
+    const b = buckets[i];
+    const isLast = i === buckets.length - 1;
+    const share = isLast ? remaining : Math.min(b.qty, Math.round((reduceQty * (b.qty / bucketTotal)) * 1000) / 1000);
+    if(share > 0.0005) out[b.id] = (out[b.id]||0) - share;
+    remaining = Math.round((remaining - share) * 1000) / 1000;
+  }
+  return out;
+}
+/* The surplus counterpart to applyStorageReduction(): a Stok Opname plain
+   recount can also find MORE physical stock than the system recorded (a
+   "kelebihan"), not just less. That surplus used to land unconditionally in
+   the 'mix' Peruntukan bucket, no matter which bucket(s) the item's existing
+   stock actually lived in -- the single biggest source of items quietly
+   gaining a "Mix Use" allocation they never should have (an item that was
+   100% Kitchen before the opname would come out of it with a sliver tagged
+   Mix Use for every small, completely normal recount surplus). Now the
+   surplus is split proportional to whichever buckets already hold this
+   item's stock, the same idea applyStorageReduction already used for
+   shrinkage. Mix Use is used only when the item currently has no stock in
+   ANY bucket at this location -- there's then nothing to be proportional to,
+   and a plain recount (unlike "Tambah Barang") never tells us whose it is. */
+function previewStorageIncrease(warehouseId, itemId, addQty){
+  addQty = Math.round(Math.abs(addQty) * 1000) / 1000;
+  if(addQty <= 0.0005) return {};
+  const buckets = PERUNTUKAN_OPTIONS
+    .map(p=>({ id: p.id, qty: stockQtyByPeruntukan(warehouseId, itemId, p.id) }))
+    .filter(b=>b.qty > 0.0005);
+  const bucketTotal = Math.round(buckets.reduce((s,b)=>s+b.qty, 0) * 1000) / 1000;
+  if(bucketTotal <= 0.0005) return { mix: addQty };
+  let remaining = addQty;
+  const out = {};
+  for(let i=0;i<buckets.length;i++){
+    const b = buckets[i];
+    const isLast = i === buckets.length - 1;
+    const share = isLast ? remaining : Math.round((addQty * (b.qty / bucketTotal)) * 1000) / 1000;
+    if(share > 0.0005) out[b.id] = (out[b.id]||0) + share;
+    remaining = Math.round((remaining - share) * 1000) / 1000;
+  }
+  return out;
+}
+async function applyStorageIncrease(warehouseId, itemId, addQty){
+  const split = previewStorageIncrease(warehouseId, itemId, addQty);
+  for(const id of Object.keys(split)){
+    if(Math.abs(split[id]) > 0.0005) await adjustStock(warehouseId, itemId, split[id], id, {allowNegative:true});
+  }
+}
 
 /* Suggests the next available item code. Real codes here are plain
    incrementing numbers ("1", "2", … "930", no prefix/padding) for regular
@@ -2628,26 +2693,38 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added, add
     /* For a Gudang Utama location, keep a per-item breakdown of how much of
        this item's counted quantity sits under each Peruntukan (allocation) --
        needed so Laporan Stock Opname can later show, at this exact moment in
-       time, which divisi an allocated item belonged to. The physical-count
-       delta itself (the difference vs system) always lands in Mix Use, same
-       as adjustStock() below always applies it with peruntukan 'mix' --
-       EXCEPT a 'goods' item added with an explicit Peruntukan choice on
-       "Tambah Barang" (see opnameAddedPeruntukan), which lands in that
-       divisi's own bucket instead, since the counter told us exactly whose
-       it is. */
-    const targetPeruntukan = (addedType==='goods' && addedPeruntukan[itemId]) ? addedPeruntukan[itemId] : 'mix';
+       time, which divisi an allocated item belonged to.
+       A 'goods' item added with an explicit Peruntukan choice on "Tambah
+       Barang" (see opnameAddedPeruntukan) lands wholly in that divisi's own
+       bucket, since the counter told us exactly whose it is -- goodsPeruntukan
+       below. Everything else (a plain recount difference against an item
+       already in the system, or -- defensively -- a 'goods' add that somehow
+       has no chosen Peruntukan) is split proportional to whichever bucket(s)
+       already hold this item's stock, via previewStorageReduction/
+       previewStorageIncrease -- the exact same split the write loop further
+       down actually applies (applyStorageReduction/applyStorageIncrease), so
+       this snapshot can never drift from what really got written. Mix Use is
+       only ever used as those two functions' own fallback, when the item
+       currently has no stock in any bucket to be proportional to -- never as
+       a default for "we didn't bother figuring out whose this is". */
+    const goodsPeruntukan = (addedType==='goods' && addedPeruntukan[itemId]) ? addedPeruntukan[itemId] : null;
     let peruntukanQty = null;
     if(isStorageWarehouse(locationId)){
       peruntukanQty = {};
       PERUNTUKAN_OPTIONS.forEach(p=>{ peruntukanQty[p.id] = stockQtyByPeruntukan(locationId, itemId, p.id); });
-      peruntukanQty[targetPeruntukan] = (peruntukanQty[targetPeruntukan]||0) + delta;
+      if(goodsPeruntukan){
+        peruntukanQty[goodsPeruntukan] = (peruntukanQty[goodsPeruntukan]||0) + delta;
+      } else {
+        const split = delta < 0 ? previewStorageReduction(locationId, itemId, delta) : previewStorageIncrease(locationId, itemId, delta);
+        Object.keys(split).forEach(id=>{ peruntukanQty[id] = (peruntukanQty[id]||0) + split[id]; });
+      }
     }
     allItemsDetail.push({
       itemId, itemName: item.name, kode: item.kode||'', uom: item.uom||'',
       systemQty: system, physicalQty: physical, selisih: delta,
       price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: addedType ? value : delta*(item.lastPrice||0),
       ...(addedType ? {addedType} : {}),
-      ...(addedType==='goods' && isStorageWarehouse(locationId) ? {addedPeruntukan: targetPeruntukan} : {}),
+      ...(addedType==='goods' && isStorageWarehouse(locationId) ? {addedPeruntukan: goodsPeruntukan||'mix'} : {}),
       ...(peruntukanQty ? {peruntukanQty} : {}),
     });
     if(addedType==='wip') return; // WIP value is counted above but never touches real stock
@@ -2655,7 +2732,7 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added, add
       const detail = useSmall
         ? ('fisik ' + fmtNum(enteredQty) + ' ' + item.smallUnit + ' (≈ ' + fmtNum(physical) + ' ' + item.uom + ')')
         : ('fisik ' + fmtNum(physical) + ' ' + item.uom);
-      changedLines.push({item, system, physical, delta, detail, addedType, peruntukan: addedType==='goods' ? targetPeruntukan : null});
+      changedLines.push({item, system, physical, delta, detail, addedType, peruntukan: addedType==='goods' ? goodsPeruntukan : null});
     }
   });
   const usedValue = systemTotalValue - totalValue;
@@ -2688,6 +2765,14 @@ async function actionSubmitOpnameCount(locationId, counts, periodKey, added, add
         // of always hitting 'mix', which used to silently no-op whenever
         // the real stock lived in a different bucket.
         await applyStorageReduction(locationId, line.item.id, line.delta);
+      } else if(isStorageWarehouse(locationId) && line.delta > 0 && line.peruntukan == null){
+        // Plain recount surplus ("kelebihan"): split it across whichever
+        // bucket(s) already hold this item's stock -- see
+        // applyStorageIncrease() -- instead of dumping the whole thing into
+        // 'mix', which used to be the only thing this branch ever did and is
+        // the main reason items that were already fully allocated to one
+        // divisi kept gaining a Mix Use allocation after every opname.
+        await applyStorageIncrease(locationId, line.item.id, line.delta);
       } else {
         const peruntukan = isStorageWarehouse(locationId) ? (line.peruntukan || 'mix') : null;
         await adjustStock(locationId, line.item.id, line.delta, peruntukan, {allowNegative:true});
@@ -4376,7 +4461,7 @@ function renderOpnameCorrect(){
     <div class="panel">
       <div class="panel-head"><h3>Koreksi Hitung Fisik — ${escapeHtml(whName(locationId))}</h3></div>
       <div class="filter-row">
-        <input type="text" placeholder="Cari barang…" value="${escapeHtml(state.opnameCorrectSearch||'')}" oninput="setOpnameCorrectSearch(this.value)">
+        <input type="text" id="opnameCorrectSearchInput" placeholder="Cari barang…" value="${escapeHtml(state.opnameCorrectSearch||'')}" oninput="setOpnameCorrectSearch(this.value)">
       </div>
       <div class="table-scroll">
         <table>
@@ -4920,8 +5005,11 @@ function openAddOpnameItemModal(){
     </div>
     <div class="cell-sub" style="margin:-8px 0 12px;">Harga Total otomatis terisi dari harga terakhir barang × Jumlah Fisik -- ubah kalau nilainya berbeda (mis. barang ini tidak dibeli lewat Penerimaan Barang).</div>
     ${isStorage ? `
-    <div class="field"><label>Peruntukan</label><select id="addItemOpnamePeruntukan">${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}" ${p.id==='mix'?'selected':''}>${escapeHtml(p.name)}</option>`).join('')}</select></div>
-    <div class="cell-sub" style="margin-top:-8px;">${escapeHtml(whName(locationId))} adalah Gudang Utama -- pilih divisi mana barang ini untuk. "Mix Use" kalau belum jelas peruntukannya.</div>
+    <div class="field"><label>Peruntukan</label><select id="addItemOpnamePeruntukan">
+      <option value="" selected disabled>Pilih Peruntukan…</option>
+      ${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}">${escapeHtml(p.name)}</option>`).join('')}
+    </select></div>
+    <div class="cell-sub" style="margin-top:-8px;">${escapeHtml(whName(locationId))} adalah Gudang Utama -- pilih divisi mana barang ini untuk. "Mix Use" kalau memang untuk dipakai bersama, bukan default -- harus dipilih sengaja.</div>
     ` : `<div class="cell-sub">Barang ini otomatis untuk ${escapeHtml(whName(locationId))} -- lokasi ini bukan Gudang Utama, jadi tidak perlu memilih Peruntukan.</div>`}
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitAddOpnameItem()">Tambahkan</button>`;
@@ -4968,6 +5056,12 @@ function submitAddOpnameItem(){
   if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
   const hargaEl = document.getElementById('addItemOpnameHarga');
   const peruntukanSel = document.getElementById('addItemOpnamePeruntukan');
+  // Peruntukan is required (no pre-selected Mix Use default) whenever this
+  // location is Gudang Utama -- same reasoning as Penerimaan Barang's
+  // Peruntukan requirement: an unset value must never silently become Mix
+  // Use, because that's exactly what used to inflate the Mix Use bucket with
+  // items a counter simply hadn't gotten around to tagging yet.
+  if(peruntukanSel && !peruntukanSel.value){ err.innerHTML = errBox('Pilih Peruntukan untuk barang ini. Pilih Mix Use kalau barang ini memang untuk dipakai bersama semua divisi.'); return; }
   opnameCounts[itemId] = qty;
   // Only 'goods' can land here -- WIP-category items are filtered out of
   // the picker in openAddOpnameItemModal() above, so they can only enter
@@ -5337,6 +5431,7 @@ function renderStoreRequests(){
     <div class="action-row">
       ${canCreate ? `<button class="btn btn-primary" onclick="openStoreRequestModal()">${ICONS.plus} Permintaan Baru</button>` : ''}
     </div>
+    ${canCreate ? draftListHtml('sr', 'srResumeDraft', 'srConfirmDeleteDraft', 'Permintaan Barang') : ''}
     <div class="panel">
       <div class="filter-row" style="border-bottom:1px solid var(--border);">
         ${tabs.map(t=>`<button class="tab-btn ${state.srTab===t.id?'active':''}" onclick="setSrTab('${t.id}')">${t.label}${t.id==='menunggu'&&pendingCount()>0?' ('+pendingCount()+')':''}</button>`).join('')}
@@ -5424,6 +5519,7 @@ function renderWipRequests(){
     <div class="action-row">
       ${canCreate ? `<button class="btn btn-primary" onclick="openWipRequestModal()">${ICONS.plus} Permintaan WIP Baru</button>` : ''}
     </div>
+    ${canCreate ? draftListHtml('wipreq', 'wipReqResumeDraft', 'wipReqConfirmDeleteDraft', 'Permintaan WIP') : ''}
     <div class="panel">
       <div class="filter-row" style="border-bottom:1px solid var(--border);">
         ${tabs.map(t=>`<button class="tab-btn ${state.wipTab===t.id?'active':''}" onclick="setWipTab('${t.id}')">${t.label}${t.id==='menunggu'&&pendingWipCount()>0?' ('+pendingWipCount()+')':''}</button>`).join('')}
@@ -5728,6 +5824,7 @@ function renderReceiving(){
     <div class="action-row">
       ${canR ? `<button class="btn btn-primary" onclick="openReceivingModal()">${ICONS.plus} Penerimaan Baru</button>` : `<div class="lock-note" style="margin:0;">Hanya Receiving dan Master User yang mencatat Penerimaan Barang.</div>`}
     </div>
+    ${canR ? draftListHtml('gr', 'grResumeDraft', 'grConfirmDeleteDraft', 'Penerimaan Barang') : ''}
     <div class="panel">
       <div class="panel-head"><h3>Riwayat Penerimaan</h3><span class="hint">${docs.length} dokumen</span></div>
       <div class="filter-row">
@@ -6383,7 +6480,7 @@ function renderWipItemsMaster(){
     <div class="panel">
       <div class="panel-head"><h3>Barang WIP</h3><span class="hint">${filtersActive ? filtered.length + ' dari ' + totalWip : totalWip} barang WIP</span></div>
       <div class="filter-row">
-        <input type="text" style="min-width:200px;" placeholder="Cari nama atau kode…" value="${escapeHtml(state.wipItemsSearch)}" oninput="setWipItemsSearch(this.value)">
+        <input type="text" id="wipItemsSearchInput" style="min-width:200px;" placeholder="Cari nama atau kode…" value="${escapeHtml(state.wipItemsSearch)}" oninput="setWipItemsSearch(this.value)">
         <select onchange="setWipItemsCategory(this.value)">
           <option value="">Semua Kategori WIP</option>
           <option value="WIP Kitchen" ${state.wipItemsCategory==='WIP Kitchen'?'selected':''}>WIP Kitchen</option>
@@ -8698,8 +8795,30 @@ function openModal(title, bodyHtml, footHtml, wide){
     <div class="modal-foot">${footHtml}</div>
   `;
   document.getElementById('modalBackdrop').classList.add('open');
+  // Every freshly-opened modal starts with no close-hook; a form that wants
+  // one (see _modalOnClose below) re-arms it right after this call returns.
+  _modalOnClose = null;
 }
-function closeModal(){ document.getElementById('modalBackdrop').classList.remove('open'); }
+/* Optional callback a form can register (right after calling openModal) to
+   run just before the modal actually hides -- whatever the user did to
+   close it: the "x" button, "Batal", clicking the backdrop, or a successful
+   submit. Used by Penerimaan Barang to auto-save an in-progress form as a
+   draft so clicking outside by accident (or stepping away to add a missing
+   item to Master Data first) never silently throws away what was typed.
+   Read as one-shot: closeModal() clears it immediately so it never fires
+   twice or leaks into whatever modal opens next. */
+let _modalOnClose = null;
+function closeModal(){
+  if(_modalOnClose){ const cb = _modalOnClose; _modalOnClose = null; try{ cb(); }catch(e){} }
+  document.getElementById('modalBackdrop').classList.remove('open');
+  // Re-render the page underneath so anything a close-hook just changed --
+  // most notably a draft list a hook like grAutoSaveDraft just added to or
+  // updated -- shows up immediately instead of only after the next
+  // unrelated navigation/render. Cheap and harmless even when nothing
+  // changed (e.g. a plain "Batal" with no hook, or a submit whose own
+  // action already re-rendered).
+  render();
+}
 document.getElementById('modalBackdrop').addEventListener('click', (e)=>{ if(e.target.id==='modalBackdrop') closeModal(); });
 function errBox(msg){ return `<div class="form-error">${msg}</div>`; }
 async function submitGuarded(errEl, fn){
@@ -8749,14 +8868,133 @@ function updatePriceCalc(prefix){
 /* --- Receiving (Barang Masuk) --- */
 /* --- Penerimaan Barang (multi-item) --- */
 let receivingLines = [];
+/* --- Drafts: generic multi-draft persistence + resumable list ---
+   Shared by any "new document" modal that wants protection against losing
+   in-progress work when its modal closes without submitting (misclick on
+   the backdrop, "Batal", stepping away to add a missing item to Master
+   Data first, etc). Used by Penerimaan Barang ('gr'), Permintaan Barang
+   ('sr') and Permintaan WIP ('wipreq'). Each form type keeps its own
+   array of drafts in localStorage, scoped to the logged-in user so two
+   staff on the same device never see each other's drafts. A draft is
+   {id, savedAt, summary, data} -- `summary` is a short label for the list
+   UI below the form's "Baru" button, `data` is whatever payload the
+   specific form needs to resume (never includes a File, e.g. Penerimaan
+   Barang's PDF attachment, since that can't survive JSON/localStorage). */
+function draftsStorageKey(formType){ return 'inv_drafts_' + formType + '_' + (authedUsername || 'anon'); }
+function loadDraftList(formType){
+  try{
+    const raw = localStorage.getItem(draftsStorageKey(formType));
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list : [];
+  }catch(e){ return []; }
+}
+function saveDraftList(formType, list){
+  try{ localStorage.setItem(draftsStorageKey(formType), JSON.stringify(list)); }catch(e){ /* storage unavailable/full -- draft just won't persist */ }
+}
+// Creates a new draft, or updates one in place when draftId already names
+// an existing entry -- so repeatedly closing the same in-progress form
+// updates one list row instead of piling up duplicates. Returns the id.
+function upsertDraft(formType, draftId, summary, data){
+  const list = loadDraftList(formType);
+  const idx = draftId ? list.findIndex(d=>d.id===draftId) : -1;
+  const id = idx>=0 ? list[idx].id : (Date.now().toString(36) + Math.random().toString(36).slice(2,8));
+  const entry = {id, savedAt: new Date().toISOString(), summary, data};
+  if(idx>=0) list[idx] = entry; else list.unshift(entry);
+  saveDraftList(formType, list);
+  return id;
+}
+function deleteDraft(formType, draftId){ saveDraftList(formType, loadDraftList(formType).filter(d=>d.id!==draftId)); }
+function getDraft(formType, draftId){ return loadDraftList(formType).find(d=>d.id===draftId) || null; }
+// Small resumable-drafts panel rendered under a "<x> Baru" button. Shown
+// only when at least one draft exists for this form type. resumeFn/
+// deleteFn are global function names (strings) called with the draft id.
+function draftListHtml(formType, resumeFn, deleteFn, noun){
+  const list = loadDraftList(formType);
+  if(list.length===0) return '';
+  return `<div class="panel" style="margin-bottom:14px;">
+    <div class="panel-head"><h3>Draft Tersimpan</h3><span class="hint">${list.length} draft ${escapeHtml(noun)} belum dikirim</span></div>
+    <div class="table-scroll">
+      <table>
+        <tbody>
+          ${list.map(d=>`<tr class="clickable" onclick="${resumeFn}('${d.id}')">
+            <td class="cell-title">${escapeHtml(d.summary||'(kosong)')}</td>
+            <td class="cell-sub" style="white-space:nowrap;">${fmtRelative(d.savedAt)}</td>
+            <td style="width:1%; white-space:nowrap;" onclick="event.stopPropagation()"><button class="btn btn-sm btn-danger-outline" onclick="${deleteFn}('${d.id}')">Hapus</button></td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`;
+}
+
+/* --- Penerimaan Barang: save-as-draft ---
+   Only for a brand-new receiving (never for editing an existing document --
+   that already has a saved record behind it, and mixing in draft-restore
+   logic there would risk silently reviving stale edits). _grDraftId tracks
+   which saved draft (if any) the currently-open modal corresponds to, so
+   closing it again updates that same entry instead of creating a
+   duplicate, and a successful submit deletes it outright (see
+   submitReceivingDoc). The PDF attachment, if any, is NOT part of the
+   draft (a File object can't be serialized into localStorage) -- resuming
+   a draft that had one just asks the user to re-attach it. */
+let _grDraftId = null;
+function grHasMeaningfulDraftContent(){
+  const supplierTyped = (document.getElementById('grSupplierInput')||{}).value || '';
+  const doTyped = (document.getElementById('grDoNumber')||{}).value || '';
+  const noteTyped = (document.getElementById('grNote')||{}).value || '';
+  const hasLineContent = receivingLines.some(l=> (l.itemName||'').trim() || parseFloat(l.qty)>0 || parsePriceInput(l.price)>0);
+  return !!(supplierTyped.trim() || doTyped.trim() || noteTyped.trim() || hasLineContent);
+}
+function grDraftSummary(){
+  const supplierName = ((document.getElementById('grSupplierInput')||{}).value || '').trim();
+  const items = receivingLines.filter(l=>(l.itemName||'').trim());
+  const itemPart = items.length ? (items[0].itemName.trim() + (items.length>1 ? ' +'+(items.length-1)+' lainnya' : '')) : 'Belum ada barang';
+  return supplierName ? (supplierName + ' — ' + itemPart) : itemPart;
+}
+function grAutoSaveDraft(){
+  // Only meaningful while the new-receiving modal's fields are actually in
+  // the DOM -- if something else already closed/replaced the modal box
+  // first, there's nothing left to read.
+  if(!document.getElementById('grSupplierInput')){ return; }
+  if(!grHasMeaningfulDraftContent()){
+    // Nothing worth keeping. If this session had been resumed from an
+    // existing draft, emptying it back out means "I don't want this
+    // anymore" -- remove it instead of leaving a stale empty row behind.
+    if(_grDraftId){ deleteDraft('gr', _grDraftId); _grDraftId = null; }
+    return;
+  }
+  const data = {
+    supplierName: (document.getElementById('grSupplierInput')||{}).value || '',
+    supplierId: (document.getElementById('grSupplier')||{}).value || '',
+    doNumber: (document.getElementById('grDoNumber')||{}).value || '',
+    dateTimeVal: (document.getElementById('grDateTime')||{}).value || '',
+    ppn: (document.getElementById('grPpn')||{}).value || '',
+    shipping: (document.getElementById('grShipping')||{}).value || '',
+    note: (document.getElementById('grNote')||{}).value || '',
+    hadAttachment: !!grAttachmentFile,
+    lines: receivingLines.map(l=>({...l})),
+  };
+  _grDraftId = upsertDraft('gr', _grDraftId, grDraftSummary(), data);
+}
+function grDiscardDraftAndReset(){
+  if(_grDraftId){ deleteDraft('gr', _grDraftId); _grDraftId = null; }
+  openReceivingModal();
+}
+function grResumeDraft(draftId){ openReceivingModal(undefined, draftId); }
+function grConfirmDeleteDraft(draftId){
+  openConfirm('Hapus Draft', 'Hapus draft Penerimaan Barang ini? Tindakan ini tidak bisa dibatalkan.', ()=>{ deleteDraft('gr', draftId); render(); toast('Draft dihapus.'); }, 'Hapus', true);
+}
 /* editDocNumber: when set, prefills the form from an existing 'in' document
    and routes submit to actionEditReceivingDoc instead of creating a new one.
    Editing/deleting a receipt is restricted to canEditMaster (Master/Receiving)
-   -- same reach as who can already add a late attachment to one. */
-function openReceivingModal(editDocNumber){
+   -- same reach as who can already add a late attachment to one. draftId:
+   when set (and not editing), resumes that specific saved draft -- passed
+   by clicking an entry in the draft list rendered on the Receiving page. */
+function openReceivingModal(editDocNumber, draftId){
   const role = currentRole();
   const isEdit = !!editDocNumber;
   let first = null;
+  let loaded = null;
   if(isEdit){
     const existingLines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber));
     if(existingLines.length===0) return;
@@ -8767,36 +9005,45 @@ function openReceivingModal(editDocNumber){
       category: (itemById(l.itemId)||{}).category || 'Supplies', peruntukan: l.peruntukan || 'mix',
       locationId: l.toWarehouseId,
     }));
+    _grDraftId = null;
   } else {
     if(!canReceive(role)){ toast('Peran ini tidak mencatat Penerimaan Barang.', true); return; }
-    // peruntukan starts BLANK (not defaulted to 'mix') for a brand-new line --
-    // see the comment on grRenderLines' Peruntukan <select> for why: an
-    // unset value must never silently become Mix Use for new stock.
-    receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'', locationId: WAREHOUSES[0].id}];
+    loaded = draftId ? getDraft('gr', draftId) : null;
+    _grDraftId = loaded ? loaded.id : null;
+    if(loaded){
+      receivingLines = loaded.data.lines.map(l=>({...l}));
+    } else {
+      // peruntukan starts BLANK (not defaulted to 'mix') for a brand-new line --
+      // see the comment on grRenderLines' Peruntukan <select> for why: an
+      // unset value must never silently become Mix Use for new stock.
+      receivingLines = [{itemName:'', qty:'', uom:'', price:'', category:'', peruntukan:'', locationId: WAREHOUSES[0].id}];
+    }
   }
   grAttachmentFile = null;
+  const draft = loaded ? loaded.data : null;
   const body = `
     <div id="grError"></div>
+    ${loaded ? `<div class="lock-note">Draft tersimpan dari ${fmtRelative(loaded.savedAt)} dipulihkan.${draft.hadAttachment?' Lampiran PDF sebelumnya tidak ikut tersimpan — pilih lagi kalau masih diperlukan.':''} <button type="button" class="mini-link-btn" onclick="grDiscardDraftAndReset()">Buang draft, mulai baru</button></div>` : ''}
     <div class="two-col">
       <div class="field">
         <label>Supplier</label>
         <div class="combo-wrap">
-          <input type="text" id="grSupplierInput" placeholder="Ketik nama supplier…" autocomplete="off" value="${isEdit?escapeHtml(first.supplierName||''):''}"
+          <input type="text" id="grSupplierInput" placeholder="Ketik nama supplier…" autocomplete="off" value="${isEdit?escapeHtml(first.supplierName||''):escapeHtml(draft?draft.supplierName||'':'')}"
             oninput="grOnSupplierInput(this.value)"
             onfocus="grRenderSupplierCombo(this.value)"
             onblur="setTimeout(()=>grCloseSupplierCombo(), 150)">
           <div class="combo-list" id="grSupplierCombo"></div>
         </div>
-        <input type="hidden" id="grSupplier" value="${isEdit?(first.supplierId||''):''}">
+        <input type="hidden" id="grSupplier" value="${isEdit?(first.supplierId||''):(draft?draft.supplierId||'':'')}">
         <div class="desc" id="grSupplierHint"></div>
       </div>
-      <div class="field"><label>No. Surat Jalan / DO (opsional)</label><input type="text" id="grDoNumber" placeholder="cth. SJ-00123" value="${isEdit?escapeHtml(first.doNumber||''):''}"></div>
+      <div class="field"><label>No. Surat Jalan / DO (opsional)</label><input type="text" id="grDoNumber" placeholder="cth. SJ-00123" value="${isEdit?escapeHtml(first.doNumber||''):escapeHtml(draft?draft.doNumber||'':'')}"></div>
     </div>
     <div class="two-col">
-      <div class="field"><label>Tanggal &amp; Waktu</label><input type="datetime-local" id="grDateTime" value="${isEdit?toDatetimeLocalValue(first.createdAt):nowDatetimeLocalValue()}"></div>
+      <div class="field"><label>Tanggal &amp; Waktu</label><input type="datetime-local" id="grDateTime" value="${isEdit?toDatetimeLocalValue(first.createdAt):(draft&&draft.dateTimeVal?draft.dateTimeVal:nowDatetimeLocalValue())}"></div>
       <div class="field"><label>PPN (opsional)</label>
         <div style="display:flex; align-items:center; gap:8px;">
-          <input type="text" inputmode="numeric" id="grPpn" placeholder="0" value="${isEdit&&first.ppn?Number(first.ppn).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
+          <input type="text" inputmode="numeric" id="grPpn" placeholder="0" value="${isEdit&&first.ppn?Number(first.ppn).toLocaleString('id-ID'):(draft&&draft.ppn?escapeHtml(draft.ppn):'')}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
           <span class="cell-sub" style="flex-shrink:0;">Tidak masuk Total</span>
         </div>
       </div>
@@ -8804,7 +9051,7 @@ function openReceivingModal(editDocNumber){
     <div class="two-col">
       <div class="field"><label>Harga Pengiriman (opsional)</label>
         <div style="display:flex; align-items:center; gap:8px;">
-          <input type="text" inputmode="numeric" id="grShipping" placeholder="0" value="${isEdit&&first.shippingCost?Number(first.shippingCost).toLocaleString('id-ID'):''}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
+          <input type="text" inputmode="numeric" id="grShipping" placeholder="0" value="${isEdit&&first.shippingCost?Number(first.shippingCost).toLocaleString('id-ID'):(draft&&draft.shipping?escapeHtml(draft.shipping):'')}" oninput="formatPriceInput(this)" style="flex:1; min-width:0;">
           <span class="cell-sub" style="flex-shrink:0;">Tidak masuk Total</span>
         </div>
       </div>
@@ -8817,7 +9064,7 @@ function openReceivingModal(editDocNumber){
     <div class="cell-sub" style="margin-top:-4px; margin-bottom:14px;">Lampiran PDF dikelola dari halaman detail penerimaan, bukan di sini.</div>
     ` : `
     <div class="two-col">
-      <div class="field"><label>Catatan (opsional)</label><textarea id="grNote" placeholder="No. PO, dll"></textarea></div>
+      <div class="field"><label>Catatan (opsional)</label><textarea id="grNote" placeholder="No. PO, dll">${draft?escapeHtml(draft.note||''):''}</textarea></div>
       <div class="field"><label>Lampiran PDF (opsional)</label>
         <input type="file" id="grAttachmentInput" accept="application/pdf" onchange="grOnAttachmentChange(this)">
         <div class="cell-sub" id="grAttachmentName" style="margin-top:5px;">Bukti penerimaan / invoice / surat jalan.</div>
@@ -8831,6 +9078,9 @@ function openReceivingModal(editDocNumber){
     : `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitReceivingDoc()">Simpan Penerimaan</button>`;
   openModal(isEdit ? 'Ubah Penerimaan ' + editDocNumber : 'Penerimaan Barang', body, foot, true);
   grRenderLines();
+  // Auto-save-as-draft only applies to a brand-new receiving -- editing an
+  // existing document is never silently drafted (see the comment above).
+  if(!isEdit) _modalOnClose = grAutoSaveDraft;
 }
 let grAttachmentFile = null;
 function grOnAttachmentChange(input){
@@ -9096,6 +9346,12 @@ async function submitReceivingDoc(editDocNumber){
       }
     }
     await actionReceivingDoc({supplierId, supplierName: supplierObj?supplierObj.name:'', lines, note, doNumber, ppn, shippingCost, attachmentId, createdAt});
+    // Submission succeeded -- delete the draft this session was tracking
+    // (if any) and disarm the hook, since the closeModal() submitGuarded is
+    // about to call would otherwise re-save the just-submitted (and now
+    // stale) form data as a "new" draft.
+    if(_grDraftId){ deleteDraft('gr', _grDraftId); _grDraftId = null; }
+    _modalOnClose = null;
   });
 }
 
@@ -9183,27 +9439,73 @@ let srLines = [];
 // existing request's fixed division, see openEditSrModal) and kept in sync
 // by srOnDivisionChange() whenever the Divisi dropdown itself changes.
 let srDivisionId = '';
-function openStoreRequestModal(){
+/* --- Permintaan Barang: save-as-draft (see the generic drafts module
+   above grAutoSaveDraft for the shared storage/list mechanics). Only
+   openStoreRequestModal ever creates a new request -- editing an existing
+   one goes through the separate openEditSrModal, which never drafts. */
+let _srDraftId = null;
+function srHasMeaningfulDraftContent(){
+  const noteTyped = (document.getElementById('srNote')||{}).value || '';
+  const hasLineContent = srLines.some(l=> l.itemId || parseFloat(l.qty)>0);
+  return !!(noteTyped.trim() || hasLineContent);
+}
+function srDraftSummary(){
+  const division = divisionById(srDivisionId);
+  const items = srLines.filter(l=>l.itemId).map(l=>(itemById(l.itemId)||{}).name).filter(Boolean);
+  const itemPart = items.length ? (items[0] + (items.length>1 ? ' +'+(items.length-1)+' lainnya' : '')) : 'Belum ada barang';
+  return (division ? division.name + ' — ' : '') + itemPart;
+}
+function srAutoSaveDraft(){
+  if(!document.getElementById('srLinesBox')){ return; }
+  if(!srHasMeaningfulDraftContent()){
+    if(_srDraftId){ deleteDraft('sr', _srDraftId); _srDraftId = null; }
+    return;
+  }
+  const data = {
+    divisionId: srDivisionId,
+    note: (document.getElementById('srNote')||{}).value || '',
+    lines: srLines.map(l=>({...l})),
+  };
+  _srDraftId = upsertDraft('sr', _srDraftId, srDraftSummary(), data);
+}
+function srDiscardDraftAndReset(){
+  if(_srDraftId){ deleteDraft('sr', _srDraftId); _srDraftId = null; }
+  openStoreRequestModal();
+}
+function srResumeDraft(draftId){ openStoreRequestModal(draftId); }
+function srConfirmDeleteDraft(draftId){
+  openConfirm('Hapus Draft', 'Hapus draft Permintaan Barang ini? Tindakan ini tidak bisa dibatalkan.', ()=>{ deleteDraft('sr', draftId); render(); toast('Draft dihapus.'); }, 'Hapus', true);
+}
+function openStoreRequestModal(draftId){
   const role = currentRole();
   if(!canCreateSR(role)){ toast('Peran ini tidak membuat Permintaan Barang.', true); return; }
   const isMaster = role.kind==='master';
   const allowedDivisions = isMaster ? DIVISIONS : (role.divisionIds ? DIVISIONS.filter(d=>role.divisionIds.includes(d.id)) : DIVISIONS);
   const lockedDivision = (!isMaster && allowedDivisions.length===1) ? allowedDivisions[0] : null;
-  srLines = [{itemId:'', qty:''}];
-  srDivisionId = lockedDivision ? lockedDivision.id : (allowedDivisions[0] ? allowedDivisions[0].id : '');
+  const loaded = draftId ? getDraft('sr', draftId) : null;
+  _srDraftId = loaded ? loaded.id : null;
+  if(loaded){
+    srLines = loaded.data.lines.map(l=>({...l}));
+    srDivisionId = lockedDivision ? lockedDivision.id : (loaded.data.divisionId && allowedDivisions.some(d=>d.id===loaded.data.divisionId) ? loaded.data.divisionId : (allowedDivisions[0] ? allowedDivisions[0].id : ''));
+  } else {
+    srLines = [{itemId:'', qty:''}];
+    srDivisionId = lockedDivision ? lockedDivision.id : (allowedDivisions[0] ? allowedDivisions[0].id : '');
+  }
   const body = `
     <div id="srError"></div>
+    ${loaded ? `<div class="lock-note">Draft tersimpan dari ${fmtRelative(loaded.savedAt)} dipulihkan. <button type="button" class="mini-link-btn" onclick="srDiscardDraftAndReset()">Buang draft, mulai baru</button></div>` : ''}
     ${lockedDivision
       ? `<div class="lock-note">Diminta oleh <b>${escapeHtml(lockedDivision.name)}</b> — menunggu persetujuan Gudang Utama.</div>`
-      : `<div class="field"><label>Divisi</label><select id="srDivisi" onchange="srOnDivisionChange(this.value)">${allowedDivisions.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
+      : `<div class="field"><label>Divisi</label><select id="srDivisi" onchange="srOnDivisionChange(this.value)">${allowedDivisions.map(d=>`<option value="${d.id}" ${d.id===srDivisionId?'selected':''}>${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
     <div class="field"><label>Barang</label><div id="srLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="srAddLine()">+ Tambah Barang</button>
     </div>
-    <div class="field"><label>Catatan</label><textarea id="srNote" placeholder="Untuk keperluan apa"></textarea></div>
+    <div class="field"><label>Catatan</label><textarea id="srNote" placeholder="Untuk keperluan apa">${loaded?escapeHtml(loaded.data.note||''):''}</textarea></div>
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitStoreRequestDoc()">Kirim Permintaan</button>`;
   openModal('Permintaan Barang', body, foot);
   srRenderLines();
+  _modalOnClose = srAutoSaveDraft;
 }
 // Switching Divisi mid-form clears any items already picked -- an item
 // recommended/valid for the old division's Peruntukan may not even be
@@ -9330,7 +9632,11 @@ async function submitStoreRequestDoc(){
       requestedUnit: useSmall ? item.smallUnit : null,
     };
   });
-  await submitGuarded(err, async ()=>{ await actionStoreRequestDoc({divisionId, lines, note}); });
+  await submitGuarded(err, async ()=>{
+    await actionStoreRequestDoc({divisionId, lines, note});
+    if(_srDraftId){ deleteDraft('sr', _srDraftId); _srDraftId = null; }
+    _modalOnClose = null;
+  });
 }
 /* --- Setujui (langsung transfer) & Tolak (dengan catatan) --- */
 /* Gudang Utama sourcing is now fully automatic (srItemSourcePlan), so this
@@ -9427,29 +9733,86 @@ async function submitReject(docNumber){
    divisions; it never touches inventory or Stock Opname. */
 let wipReqLines = [];
 function wipReqItems(){ return state.items.filter(i=>i.category==='WIP Kitchen'); }
-function openWipRequestModal(){
+// Shared by openWipRequestModal, submitWipRequestDoc and the draft
+// auto-save -- all three need the same "who's allowed to request, and is
+// it locked to one division" resolution.
+function wipReqAllowedDivisions(){
   const role = currentRole();
-  if(!canCreateWipRequest(role)){ toast('Peran ini tidak dapat membuat Permintaan WIP.', true); return; }
-  if(wipReqItems().length===0){ toast('Belum ada barang berkategori "WIP Kitchen" di Master Data. Tambahkan dulu di halaman Barang.', true); return; }
   const isMaster = role.kind==='master';
   const kitchenDivisions = DIVISIONS.filter(d=>isKitchenDivision(d.id));
   const allowedDivisions = (isMaster || role.kind==='kitchen_leader') ? kitchenDivisions : kitchenDivisions.filter(d=>role.divisionIds && role.divisionIds.includes(d.id));
   const lockedDivision = (!isMaster && role.kind!=='kitchen_leader' && allowedDivisions.length===1) ? allowedDivisions[0] : null;
-  wipReqLines = [{itemId:'', qty:'', unit:'uom'}];
+  return {allowedDivisions, lockedDivision};
+}
+/* --- Permintaan WIP: save-as-draft (see the generic drafts module above
+   grAutoSaveDraft for the shared storage/list mechanics). WIP requests
+   are never edited after creation (only approved/rejected/deleted), so
+   openWipRequestModal is always the "new document" form. */
+let _wipReqDraftId = null;
+function wipReqHasMeaningfulDraftContent(){
+  const noteTyped = (document.getElementById('wipReqNote')||{}).value || '';
+  const hasLineContent = wipReqLines.some(l=> l.itemId || parseFloat(l.qty)>0);
+  return !!(noteTyped.trim() || hasLineContent);
+}
+function wipReqDraftSummary(divisionId){
+  const division = divisionById(divisionId);
+  const items = wipReqLines.filter(l=>l.itemId).map(l=>(itemById(l.itemId)||{}).name).filter(Boolean);
+  const itemPart = items.length ? (items[0] + (items.length>1 ? ' +'+(items.length-1)+' lainnya' : '')) : 'Belum ada barang';
+  return (division ? division.name + ' — ' : '') + itemPart;
+}
+function wipReqAutoSaveDraft(){
+  if(!document.getElementById('wipReqLinesBox')){ return; }
+  if(!wipReqHasMeaningfulDraftContent()){
+    if(_wipReqDraftId){ deleteDraft('wipreq', _wipReqDraftId); _wipReqDraftId = null; }
+    return;
+  }
+  const { lockedDivision } = wipReqAllowedDivisions();
+  const divisiEl = document.getElementById('wipDivisi');
+  const divisionId = lockedDivision ? lockedDivision.id : (divisiEl ? divisiEl.value : '');
+  const data = {
+    divisionId,
+    note: (document.getElementById('wipReqNote')||{}).value || '',
+    lines: wipReqLines.map(l=>({...l})),
+  };
+  _wipReqDraftId = upsertDraft('wipreq', _wipReqDraftId, wipReqDraftSummary(divisionId), data);
+}
+function wipReqDiscardDraftAndReset(){
+  if(_wipReqDraftId){ deleteDraft('wipreq', _wipReqDraftId); _wipReqDraftId = null; }
+  openWipRequestModal();
+}
+function wipReqResumeDraft(draftId){ openWipRequestModal(draftId); }
+function wipReqConfirmDeleteDraft(draftId){
+  openConfirm('Hapus Draft', 'Hapus draft Permintaan WIP ini? Tindakan ini tidak bisa dibatalkan.', ()=>{ deleteDraft('wipreq', draftId); render(); toast('Draft dihapus.'); }, 'Hapus', true);
+}
+function openWipRequestModal(draftId){
+  const role = currentRole();
+  if(!canCreateWipRequest(role)){ toast('Peran ini tidak dapat membuat Permintaan WIP.', true); return; }
+  if(wipReqItems().length===0){ toast('Belum ada barang berkategori "WIP Kitchen" di Master Data. Tambahkan dulu di halaman Barang.', true); return; }
+  const { allowedDivisions, lockedDivision } = wipReqAllowedDivisions();
+  const loaded = draftId ? getDraft('wipreq', draftId) : null;
+  _wipReqDraftId = loaded ? loaded.id : null;
+  if(loaded){
+    wipReqLines = loaded.data.lines.map(l=>({...l}));
+  } else {
+    wipReqLines = [{itemId:'', qty:'', unit:'uom'}];
+  }
+  const selectedDivisionId = loaded && loaded.data.divisionId && allowedDivisions.some(d=>d.id===loaded.data.divisionId) ? loaded.data.divisionId : (allowedDivisions[0] ? allowedDivisions[0].id : '');
   const body = `
     <div id="wipReqError"></div>
     <div class="lock-note">Permintaan WIP murni catatan serah-terima antar divisi kitchen — tidak memengaruhi stok/inventory maupun Stok Opname.</div>
+    ${loaded ? `<div class="lock-note">Draft tersimpan dari ${fmtRelative(loaded.savedAt)} dipulihkan. <button type="button" class="mini-link-btn" onclick="wipReqDiscardDraftAndReset()">Buang draft, mulai baru</button></div>` : ''}
     ${lockedDivision
       ? `<div class="lock-note">Diminta oleh <b>${escapeHtml(lockedDivision.name)}</b> — menunggu persetujuan Kitchen Leader.</div>`
-      : `<div class="field"><label>Divisi Peminta</label><select id="wipDivisi">${allowedDivisions.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
+      : `<div class="field"><label>Divisi Peminta</label><select id="wipDivisi">${allowedDivisions.map(d=>`<option value="${d.id}" ${d.id===selectedDivisionId?'selected':''}>${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
     <div class="field"><label>Barang WIP</label><div id="wipReqLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="wipReqAddLine()">+ Tambah Barang</button>
     </div>
-    <div class="field"><label>Catatan</label><textarea id="wipReqNote" placeholder="Untuk keperluan apa"></textarea></div>
+    <div class="field"><label>Catatan</label><textarea id="wipReqNote" placeholder="Untuk keperluan apa">${loaded?escapeHtml(loaded.data.note||''):''}</textarea></div>
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitWipRequestDoc()">Kirim Permintaan</button>`;
   openModal('Permintaan WIP', body, foot);
   wipReqRenderLines();
+  _modalOnClose = wipReqAutoSaveDraft;
 }
 function wipReqAddLine(){ wipReqLines.push({itemId:'', qty:'', unit:'uom'}); wipReqRenderLines(); }
 function wipReqRemoveLine(idx){ wipReqLines.splice(idx,1); if(wipReqLines.length===0) wipReqLines.push({itemId:'', qty:'', unit:'uom'}); wipReqRenderLines(); }
@@ -9546,7 +9909,11 @@ async function submitWipRequestDoc(){
       requestedUnit: useSmall ? item.smallUnit : null,
     };
   });
-  await submitGuarded(err, async ()=>{ await actionWipRequestDoc({divisionId, lines, note}); });
+  await submitGuarded(err, async ()=>{
+    await actionWipRequestDoc({divisionId, lines, note});
+    if(_wipReqDraftId){ deleteDraft('wipreq', _wipReqDraftId); _wipReqDraftId = null; }
+    _modalOnClose = null;
+  });
 }
 async function actionWipRequestDoc(payload){
   const docNumber = await nextDocNumber('WIP');
