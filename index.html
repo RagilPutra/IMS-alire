@@ -1057,11 +1057,13 @@ const state = {
   items: [],
   stock: [],
   transactions: [],
-  // Permintaan Barang (SR) dan Permintaan WIP masing-masing punya listener
-  // TERSENDIRI (lihat initDb) -- lihat definisinya untuk alasan kenapa ini
-  // tidak boleh cuma difilter dari `transactions` di atas.
+  // Permintaan Barang (SR), Permintaan WIP, dan Penerimaan Barang (type:'in')
+  // masing-masing punya listener TERSENDIRI (lihat initDb) -- lihat
+  // definisinya untuk alasan kenapa ini tidak boleh cuma difilter dari
+  // `transactions` di atas.
   srTransactions: [],
   wipRequestTransactions: [],
+  receivingTransactions: [],
   notifOpen: false,
   dashboardLocation: '',
   dashboardStockMode: 'value',
@@ -1541,6 +1543,23 @@ async function initDb(){
     _markLoaded('wipRequestTransactions');
   }, err=>{ toast('Gagal memuat data Permintaan WIP.', true); _markLoaded('wipRequestTransactions'); });
 
+  // Penerimaan Barang (type:'in') gets the same dedicated-listener treatment
+  // as SR/WIP request above, for the exact same reason: it's a
+  // completeness-critical screen (the Penerimaan Barang menu itself, its
+  // report/export, supplier history, item price history, and the GR
+  // detail/edit/delete flows all need to find EVERY 'in' document, not just
+  // whichever ones survived the shared 500-row window). Without this, a
+  // busy day of transfers/opname/SR activity can push yesterday's
+  // Penerimaan Barang out of `state.transactions` entirely -- the documents
+  // still exist in Firestore, they just never get loaded, so they silently
+  // vanish from every screen that reads them (reported: "tanggal 1 nya
+  // hilang" in Laporan Barang Masuk).
+  db.collection('transactions').where('type','==','in').orderBy('createdAt','desc').limit(5000).onSnapshot(snap=>{
+    state.receivingTransactions = snap.docs.map(d=>({id:d.id, ...d.data()}));
+    renderUnlessOpnameTyping();
+    _markLoaded('receivingTransactions');
+  }, err=>{ toast('Gagal memuat data Penerimaan Barang.', true); _markLoaded('receivingTransactions'); });
+
   db.collection('suppliers').onSnapshot(snap=>{
     state.suppliers = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     renderUnlessOpnameTyping();
@@ -1786,7 +1805,7 @@ async function actionReceivingDoc(payload){
    applied, so if this throws partway through, re-open the document to see
    exactly what did and didn't go through before retrying. */
 async function actionEditReceivingDoc(docNumber, payload){
-  const existingLines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
+  const existingLines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
   const first = existingLines[0];
   const keepIds = new Set();
@@ -1850,13 +1869,13 @@ async function actionEditReceivingDoc(docNumber, payload){
 }
 
 function confirmDeleteReceiving(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  const lines = state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(lines.length===0) return;
   if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
   openConfirm('Hapus Penerimaan', `Hapus Penerimaan ${docNumber}? Stok yang sudah masuk dari dokumen ini akan dikurangi kembali. Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteReceiving(docNumber), 'Hapus', true);
 }
 async function actionDeleteReceiving(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  const lines = state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(lines.length===0) return;
   if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
   try{
@@ -3164,8 +3183,8 @@ function renderDashboard(){
   const now = new Date();
   const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
   const startOfLastMonth = new Date(now.getFullYear(), now.getMonth()-1, 1);
-  const receivingThisMonthDocs = new Set(state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfThisMonth).map(t=>t.docNumber)).size;
-  const receivingLastMonthDocs = new Set(state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfThisMonth).map(t=>t.docNumber)).size;
+  const receivingThisMonthDocs = new Set(state.receivingTransactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfThisMonth).map(t=>t.docNumber)).size;
+  const receivingLastMonthDocs = new Set(state.receivingTransactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfThisMonth).map(t=>t.docNumber)).size;
   /* Value-based comparison (not just transaction count): this month's total
      Rp received so far vs last month's Rp up to the SAME day-of-month, which
      is the fair "running rate" comparison -- and a projection of where this
@@ -3173,9 +3192,9 @@ function renderDashboard(){
      meaningful before the month has actually finished. */
   const dayOfMonth = now.getDate();
   const startOfLastMonthSameDay = new Date(now.getFullYear(), now.getMonth()-1, dayOfMonth+1); // exclusive end, for a fair same-day-of-month comparison
-  const receivingValueThisMonth = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
-  const receivingValueLastMonth = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
-  const receivingValueLastMonthToSameDay = state.transactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfLastMonthSameDay).reduce((s,t)=>s+(t.totalValue||0),0);
+  const receivingValueThisMonth = state.receivingTransactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
+  const receivingValueLastMonth = state.receivingTransactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfThisMonth).reduce((s,t)=>s+(t.totalValue||0),0);
+  const receivingValueLastMonthToSameDay = state.receivingTransactions.filter(t=>t.type==='in' && new Date(t.createdAt) >= startOfLastMonth && new Date(t.createdAt) < startOfLastMonthSameDay).reduce((s,t)=>s+(t.totalValue||0),0);
   /* Simple, single comparison: this month's Rupiah received so far vs
      last month's Rupiah received in that same 1..dayOfMonth window (an
      apples-to-apples period, not the confusing "run rate" projection this
@@ -5455,7 +5474,7 @@ function renderWipRequests(){
   `;
 }
 function openReceivingDetail(docNumber){
-  const lines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
+  const lines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(lines.length===0) return;
   const first = lines[0];
   const total = lines.reduce((s,l)=>s+(l.totalValue||0),0);
@@ -5499,7 +5518,7 @@ async function submitReceivingAttachment(docNumber, inputEl){
   showLoading('Mengunggah lampiran…');
   try{
     const result = await assetsCap.upload(file, {type:'application/pdf'});
-    const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+    const lines = state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
     for(const line of lines){
       await db.doc('transactions/'+line.id).update({attachmentId: result.id});
     }
@@ -5693,7 +5712,7 @@ function renderReceiving(){
   const role = currentRole();
   const canR = canReceive(role);
   const canEditR = canEditMaster(role);
-  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
+  let docs = groupByDocNumber(state.receivingTransactions.filter(t=>t.type==='in'));
   if(state.receivingSearch){
     const q = state.receivingSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].supplierName||'').toLowerCase().includes(q) || d.lines.some(l=>(l.toWarehouseName||'').toLowerCase().includes(q)));
@@ -6043,7 +6062,7 @@ function closeDrawer(){
   state.drawerItemId = null;
 }
 function getPriceHistory(itemId){
-  const receipts = state.transactions.filter(t=>t.type==='in' && t.itemId===itemId && t.price>0).slice().sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
+  const receipts = state.receivingTransactions.filter(t=>t.type==='in' && t.itemId===itemId && t.price>0).slice().sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
   const history = [];
   let lastPrice = null;
   receipts.forEach(t=>{
@@ -6478,7 +6497,7 @@ function openSupplierDetail(supplierId){
   const s = (state.suppliers||[]).find(x=>x.id===supplierId);
   if(!s) return;
   const editable = canEditSuppliers(currentRole());
-  const docs = groupByDocNumber((state.transactions||[]).filter(t=>t.type==='in' && t.supplierId===s.id));
+  const docs = groupByDocNumber((state.receivingTransactions||[]).filter(t=>t.type==='in' && t.supplierId===s.id));
   const totalValue = docs.reduce((sum,d)=>sum + d.lines.reduce((s2,l)=>s2+(l.totalValue||0),0), 0);
   const body = `
     <div class="two-col">
@@ -8037,7 +8056,7 @@ function setReportMasukDateFrom(v){ state.reportMasukDateFrom = v; state.reportM
 function setReportMasukDateTo(v){ state.reportMasukDateTo = v; state.reportMasukPage=1; render(); }
 function resetReportMasukFilters(){ state.reportMasukSearch=''; state.reportMasukDateFrom=''; state.reportMasukDateTo=''; state.reportMasukLocation=''; state.reportMasukSupplier=''; state.reportMasukCategory=''; state.reportMasukPage=1; render(); }
 function renderReportMasuk(){
-  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
+  let docs = groupByDocNumber(state.receivingTransactions.filter(t=>t.type==='in'));
   if(state.reportMasukLocation) docs = docs.filter(d=>d.lines.some(l=>l.toWarehouseId===state.reportMasukLocation));
   if(state.reportMasukSupplier) docs = docs.filter(d=>d.lines[0].supplierId===state.reportMasukSupplier);
   if(state.reportMasukCategory) docs = docs.filter(d=>d.lines.some(l=>{ const it=itemById(l.itemId); return it && it.category===state.reportMasukCategory; }));
@@ -8082,7 +8101,7 @@ function renderReportMasuk(){
   `;
 }
 function reportMasukFilteredDocs(){
-  let docs = groupByDocNumber(state.transactions.filter(t=>t.type==='in'));
+  let docs = groupByDocNumber(state.receivingTransactions.filter(t=>t.type==='in'));
   if(state.reportMasukLocation) docs = docs.filter(d=>d.lines.some(l=>l.toWarehouseId===state.reportMasukLocation));
   if(state.reportMasukSupplier) docs = docs.filter(d=>d.lines[0].supplierId===state.reportMasukSupplier);
   if(state.reportMasukCategory) docs = docs.filter(d=>d.lines.some(l=>{ const it=itemById(l.itemId); return it && it.category===state.reportMasukCategory; }));
@@ -8724,7 +8743,7 @@ function openReceivingModal(editDocNumber){
   const isEdit = !!editDocNumber;
   let first = null;
   if(isEdit){
-    const existingLines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber));
+    const existingLines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber));
     if(existingLines.length===0) return;
     first = existingLines[0];
     if(!canEditMaster(role)){ toast('Anda tidak dapat mengubah penerimaan ini.', true); return; }
