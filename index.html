@@ -8890,15 +8890,16 @@ async function exportReportMasukPdf(){
     });
     // Label spans every column except the last (colSpan), centered, so long
     // text like "Subtotal GR-000047" never wraps into a cramped narrow cell
-    // -- the amount stays alone in "Total", right-aligned like data rows.
+    // -- the amount stays alone in "Total", left-aligned like the data rows
+    // above it (see the halign note below on why left, not right).
     body.push([
       {content:'Subtotal '+d.docNumber, colSpan:COLS-1, styles:{halign:'center', fontStyle:'bold'}},
-      {content: fmtIDR(total), styles:{halign:'right', fontStyle:'bold'}},
+      {content: fmtIDR(total), styles:{halign:'left', fontStyle:'bold'}},
     ]);
   });
   body.push([
     {content:'GRAND TOTAL', colSpan:COLS-1, styles:{halign:'center', fontStyle:'bold', fillColor:[230,220,200]}},
-    {content: fmtIDR(grand), styles:{halign:'right', fontStyle:'bold', fillColor:[230,220,200]}},
+    {content: fmtIDR(grand), styles:{halign:'left', fontStyle:'bold', fillColor:[230,220,200]}},
   ]);
 
   doc.autoTable({
@@ -8911,10 +8912,13 @@ async function exportReportMasukPdf(){
     // (761.89 = 841.89 page - 40*2 margins), with slack left over on
     // purpose so nothing is fighting for space the way the old 6-column
     // portrait table was (515pt of columns in ~515.28pt available).
+    // Jumlah/Harga/Total left-aligned on request (right-aligned numbers in
+    // these wide columns left a big ragged gap on the left side of each
+    // cell, which read as the whole table leaning/"mencong" to the right).
     columnStyles:{
       0:{cellWidth:230}, 1:{cellWidth:120}, 2:{cellWidth:95},
-      3:{halign:'right',cellWidth:55}, 4:{cellWidth:55},
-      5:{halign:'right',cellWidth:95}, 6:{halign:'right',cellWidth:100},
+      3:{halign:'left',cellWidth:55}, 4:{cellWidth:55},
+      5:{halign:'left',cellWidth:95}, 6:{halign:'left',cellWidth:100},
     },
   });
   doc.save('Laporan_Barang_Masuk.pdf');
