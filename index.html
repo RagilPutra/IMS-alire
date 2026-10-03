@@ -1745,13 +1745,21 @@ async function nextDocNumber(prefix){
 /* --- Penerimaan Barang (multi-item document) --- */
 async function actionReceivingDoc(payload){
   const docNumber = await nextDocNumber('GR');
-  for(const line of payload.lines){
+  // Every line of one GR shares the exact same createdAt (set once for the
+  // whole document, see payload.createdAt above/below) and Firestore's
+  // orderBy('createdAt') breaks ties by document id -- which is essentially
+  // random, not insertion order. lineIndex records the position the user
+  // actually entered each line in (matching their invoice/surat jalan), so
+  // every place that displays or exports these lines can sort on it instead
+  // of silently inheriting Firestore's tie-break order.
+  for(let idx=0; idx<payload.lines.length; idx++){
+    const line = payload.lines[idx];
     const item = await getOrCreateItem({name: line.itemName, category: line.category, uom: line.uom});
     const peruntukan = isStorageWarehouse(line.locationId) ? (line.peruntukan || 'mix') : null;
     await adjustStock(line.locationId, item.id, line.qty, peruntukan);
     if(line.price>0) await setItemLastPrice(item.id, line.price);
     await logTx({
-      type:'in', status:'completed', docNumber,
+      type:'in', status:'completed', docNumber, lineIndex: idx,
       itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
       price:line.price||0, totalValue:(line.price||0)*line.qty,
       toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
@@ -1778,11 +1786,16 @@ async function actionReceivingDoc(payload){
    applied, so if this throws partway through, re-open the document to see
    exactly what did and didn't go through before retrying. */
 async function actionEditReceivingDoc(docNumber, payload){
-  const existingLines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  const existingLines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
   const first = existingLines[0];
   const keepIds = new Set();
-  for(const line of payload.lines){
+  // payload.lines is in the order shown/edited in the form -- write that
+  // position back as each line's lineIndex (see actionReceivingDoc) so the
+  // saved order survives even if lines were reordered, added or removed
+  // during this edit.
+  for(let idx=0; idx<payload.lines.length; idx++){
+    const line = payload.lines[idx];
     const item = await getOrCreateItem({name: line.itemName, category: line.category, uom: line.uom});
     const peruntukan = isStorageWarehouse(line.locationId) ? (line.peruntukan || 'mix') : null;
     if(line._txId){
@@ -1799,7 +1812,7 @@ async function actionEditReceivingDoc(docNumber, payload){
       await adjustStock(line.locationId, item.id, line.qty, peruntukan);
       if(line.price>0) await setItemLastPrice(item.id, line.price);
       await db.doc('transactions/'+line._txId).update({
-        itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
+        itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty, lineIndex: idx,
         price:line.price||0, totalValue:(line.price||0)*line.qty,
         toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
         peruntukan: peruntukan,
@@ -1811,7 +1824,7 @@ async function actionEditReceivingDoc(docNumber, payload){
       await adjustStock(line.locationId, item.id, line.qty, peruntukan);
       if(line.price>0) await setItemLastPrice(item.id, line.price);
       await logTx({
-        type:'in', status:'completed', docNumber,
+        type:'in', status:'completed', docNumber, lineIndex: idx,
         itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
         price:line.price||0, totalValue:(line.price||0)*line.qty,
         toWarehouseId:line.locationId, toWarehouseName:whName(line.locationId),
@@ -2348,7 +2361,11 @@ async function generateOpnamePdf(periodKey){
       body: locRows.length ? locRows : [['Belum ada lokasi yang selesai diopname','\u2014','\u2014','\u2014','\u2014','\u2014']],
       styles:{fontSize:9, cellPadding:5},
       headStyles:{fillColor:brand, textColor:255},
-      columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'},5:{halign:'right'}},
+      // Fixed cellWidth per column (sums to the page's usable width) so every
+      // numeric column lines up squarely under its header -- 'auto' width
+      // alone can leave a long wrapped header (e.g. "Nilai Penambahan WIP")
+      // narrower or wider than its own column of right-aligned numbers.
+      columnStyles:{0:{cellWidth:70},1:{halign:'right',cellWidth:90},2:{halign:'right',cellWidth:100},3:{halign:'right',cellWidth:95},4:{halign:'right',cellWidth:90},5:{halign:'right',cellWidth:70.28}},
     });
     y = doc.lastAutoTable.finalY + 26;
 
@@ -2367,7 +2384,12 @@ async function generateOpnamePdf(periodKey){
         body: itemRows.map(it=>[it.kode||'\u2014', it.itemName, it.uom, fmtNum(it.systemQty), fmtNum(it.physicalQty), (it.selisih>0?'+':'')+fmtNum(it.selisih), fmtIDR(it.nilaiFisik), it.addedType==='wip'?'Tambahan WIP':(it.addedType==='goods'?'Tambahan':'')]),
         styles:{fontSize:8, cellPadding:4},
         headStyles:{fillColor:brand, textColor:255},
-        columnStyles:{3:{halign:'right'},4:{halign:'right'},5:{halign:'right'},6:{halign:'right'}},
+        // Fixed widths, identical on every pass of this per-warehouse loop --
+        // without them each location's table auto-sizes its own "Nama Barang"
+        // column to that location's longest item name, so the numeric columns
+        // drift sideways from one location's table to the next as the page
+        // scrolls, which is the exact "ngaco"/misaligned look being reported.
+        columnStyles:{0:{cellWidth:45},1:{cellWidth:150},2:{cellWidth:42},3:{halign:'right',cellWidth:58},4:{halign:'right',cellWidth:58},5:{halign:'right',cellWidth:55},6:{halign:'right',cellWidth:75},7:{cellWidth:32.28}},
         didParseCell: function(data){
           if(data.section==='body' && data.column.index===5){
             const it = itemRows[data.row.index];
@@ -5219,13 +5241,30 @@ function setSrSearch(v){ state.srSearch = v; state.srPage = 1; render(); }
 function setSrDateFrom(v){ state.srDateFrom = v; state.srPage = 1; render(); }
 function setSrDateTo(v){ state.srDateTo = v; state.srPage = 1; render(); }
 function resetSrFilters(){ state.srSearch=''; state.srDateFrom=''; state.srDateTo=''; state.srPage=1; render(); }
+// Every line of one multi-item document (currently: Penerimaan Barang, see
+// actionReceivingDoc) shares the exact same createdAt, so sorting by
+// createdAt alone can't recover the order the user actually entered them
+// in -- Firestore breaks createdAt ties by document id, which is opaque and
+// unrelated to entry order. lineIndex (written at save time) records that
+// real order; documents saved before lineIndex existed don't have it, so
+// those fall back to whatever order they were already in (never crashes,
+// never reorders what there's no better information for).
+function sortLinesByIndex(lines){
+  return lines.slice().sort((a,b)=>{
+    const ai = (a.lineIndex!=null) ? a.lineIndex : Infinity;
+    const bi = (b.lineIndex!=null) ? b.lineIndex : Infinity;
+    return ai - bi;
+  });
+}
 function groupByDocNumber(list){
   const groups = {};
   list.forEach(t=>{
     if(!groups[t.docNumber]) groups[t.docNumber] = { docNumber:t.docNumber, lines:[], createdAt:t.createdAt };
     groups[t.docNumber].lines.push(t);
   });
-  return Object.values(groups).sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+  const result = Object.values(groups).sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+  result.forEach(g=>{ g.lines = sortLinesByIndex(g.lines); });
+  return result;
 }
 function docLocationLabel(lines){
   const names = [...new Set(lines.map(l=>l.toWarehouseName).filter(Boolean))];
@@ -5416,7 +5455,7 @@ function renderWipRequests(){
   `;
 }
 function openReceivingDetail(docNumber){
-  const lines = state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
+  const lines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(lines.length===0) return;
   const first = lines[0];
   const total = lines.reduce((s,l)=>s+(l.totalValue||0),0);
@@ -5551,6 +5590,10 @@ function openEditSrModal(docNumber){
   const existingLines = allLines.filter(l=>l.status==='menunggu');
   if(existingLines.length===0){ toast('Permintaan ini sudah diproses, tidak bisa diubah lagi.', true); return; }
   if(!canEditSR(role, first)){ toast('Anda tidak dapat mengubah permintaan ini.', true); return; }
+  // Division is fixed for an edit (unlike the create form, there's no Divisi
+  // selector here) -- scopes any newly added line's item picker to the same
+  // division this request already belongs to.
+  srDivisionId = first.divisionId;
   srLines = existingLines.map(l=>({
     itemId: l.itemId,
     qty: l.requestedUnit ? l.requestedQty : l.qty,
@@ -7210,7 +7253,10 @@ async function exportReport1Pdf(){
         body,
         styles:{fontSize:8, cellPadding:4},
         headStyles:{fillColor:brand, textColor:255},
-        columnStyles:{0:{halign:'right', cellWidth:22},4:{halign:'right'},6:{halign:'right'},7:{halign:'right'}},
+        // Fixed widths, identical on every pass of this per-division loop --
+        // otherwise each division's table auto-sizes "Item" to its own
+        // longest item name, so columns drift between divisions down the page.
+        columnStyles:{0:{halign:'right', cellWidth:22},1:{cellWidth:120},2:{cellWidth:68},3:{cellWidth:62},4:{halign:'right', cellWidth:55},5:{cellWidth:38},6:{halign:'right', cellWidth:68},7:{halign:'right', cellWidth:72}},
         didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
       });
       y = doc.lastAutoTable.finalY + 20;
@@ -7258,7 +7304,7 @@ function reportOpnameR2Html(){
       <div class="panel-head">
         <h3>Nilai Penggunaan per Divisi${periodKey ? ' — ' + escapeHtml(periodLabel(periodKey)) : ''}</h3>
         <span class="panel-total" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-          Total Usage: <b style="color:${usageColor(grand.incomplete?null:grand.usage)};">${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
+          Total Selisih: <b style="color:${usageColor(grand.incomplete?null:grand.usage)};">${grand.incomplete ? '—' : fmtIDR(grand.usage)}</b>
           ${reportDownloadBtns(purchaseReady, 'exportReport2Pdf()', 'exportReport2Excel()')}
         </span>
       </div>
@@ -7266,7 +7312,7 @@ function reportOpnameR2Html(){
       ${!purchaseReady ? `<div class="empty-row" style="padding:22px 16px;">Memuat data pembelian periode ini…</div>` : `
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Divisi</th><th class="num">Opening Inventory</th><th class="num">Purchase</th><th class="num">Closing Inventory</th><th class="num">Inventory Usage</th></tr></thead>
+          <thead><tr><th>Divisi</th><th class="num">Persediaan Awal</th><th class="num">Pembelian</th><th class="num">Persediaan Akhir</th><th class="num">Selisih</th></tr></thead>
           <tbody>
             ${rows.map(r=>`<tr>
               <td class="cell-title">${escapeHtml(divisionLabel(r.id))}</td>
@@ -7279,7 +7325,7 @@ function reportOpnameR2Html(){
           </tbody>
         </table>
       </div>
-      <div class="lock-note">Opening Inventory = Closing Inventory periode sebelumnya (snapshot Stok Opname yang sudah difinalisasi). Jika periode sebelumnya belum pernah difinalisasi, Opening tampil "belum ada data" dan Inventory Usage tidak dihitung — bukan diasumsikan 0.</div>
+      <div class="lock-note">Persediaan Awal = Persediaan Akhir periode sebelumnya (snapshot Stok Opname yang sudah difinalisasi). Jika periode sebelumnya belum pernah difinalisasi, Persediaan Awal tampil "belum ada data" dan Selisih tidak dihitung — bukan diasumsikan 0. Selisih = Persediaan Awal + Pembelian − Persediaan Akhir: hijau berarti nilai stok berkurang (terpakai), merah berarti nilai stok bertambah (tanpa tercatat sebagai Pembelian, misalnya dari koreksi hasil hitung fisik).</div>
       `}
       `}
     </div>
@@ -7296,7 +7342,7 @@ async function exportReport2Excel(){
     ['ALIRE SAJIAN NUSANTARA'],
     ['Nilai Penggunaan per Divisi — ' + periodLabel(periodKey)],
     [],
-    ['Divisi','Opening Inventory','Purchase','Closing Inventory','Inventory Usage'],
+    ['Divisi','Persediaan Awal','Pembelian','Persediaan Akhir','Selisih'],
     ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'':Math.round(r.opening), Math.round(r.purchase||0), r.closing==null?'':Math.round(r.closing), r.usage==null?'':Math.round(r.usage)]),
     ['Grand Total', Math.round(grand.o), Math.round(grand.p), Math.round(grand.c), Math.round(grand.u)],
   ];
@@ -7329,14 +7375,16 @@ async function exportReport2Pdf(){
   doc.setFontSize(13); doc.text('Nilai Penggunaan per Divisi — ' + periodLabel(periodKey), margin, y); y+=22;
   doc.autoTable({
     startY: y, margin:{left:margin, right:margin},
-    head: [['Divisi','Opening Inventory','Purchase','Closing Inventory','Inventory Usage']],
+    head: [['Divisi','Persediaan Awal','Pembelian','Persediaan Akhir','Selisih']],
     body: [
       ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'—':fmtIDR(r.opening), fmtIDR(r.purchase||0), r.closing==null?'—':fmtIDR(r.closing), r.usage==null?'—':fmtIDR(r.usage)]),
       ['Grand Total', fmtIDR(grand.o), fmtIDR(grand.p), fmtIDR(grand.c), fmtIDR(grand.u)],
     ],
     styles:{fontSize:9, cellPadding:5},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'}},
+    // Fixed cellWidth per column -- sums to the page's usable width so
+    // "Divisi" and every Rupiah column keep the same boundary as the header.
+    columnStyles:{0:{cellWidth:115},1:{halign:'right',cellWidth:100},2:{halign:'right',cellWidth:100},3:{halign:'right',cellWidth:100},4:{halign:'right',cellWidth:100}},
     didParseCell: function(data){ if(data.section==='body' && data.row.index===rows.length) data.cell.styles.fontStyle='bold'; },
   });
   doc.save('Nilai_Penggunaan_Divisi_' + periodKey + '.pdf');
@@ -7403,7 +7451,7 @@ function reportOpnameR3Html(){
           </tbody>
         </table>
       </div>
-      <div class="lock-note">Actual Cost = Purchase (barang masuk) untuk Kitchen / Bar pada periode ini (sama dengan kolom Purchase di Nilai Penggunaan per Divisi). Actual COGS % tidak dihitung selama Net Sales belum diisi — tidak ditampilkan sebagai 0%.</div>
+      <div class="lock-note">Actual Cost = Pembelian (barang masuk) untuk Kitchen / Bar pada periode ini (sama dengan kolom Pembelian di Nilai Penggunaan per Divisi). Actual COGS % tidak dihitung selama Net Sales belum diisi — tidak ditampilkan sebagai 0%.</div>
       `}
       `}
     </div>
@@ -7452,7 +7500,8 @@ async function exportReport3Pdf(){
     body: rows.map(r=>[r.label, fmtIDR(r.actual), r.hasNs?fmtIDR(r.netSales):'Net Sales belum diisi', r.hasNs?(r.actual/r.netSales*100).toFixed(2).replace('.',',')+'%':'—']),
     styles:{fontSize:9.5, cellPadding:6},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'}},
+    // Fixed cellWidth per column -- sums to the page's usable width.
+    columnStyles:{0:{cellWidth:135},1:{halign:'right',cellWidth:130},2:{halign:'right',cellWidth:130},3:{halign:'right',cellWidth:120}},
   });
   doc.save('FB_Cost_' + periodKey + '.pdf');
   toast('Laporan PDF berhasil dibuat.');
@@ -7586,11 +7635,24 @@ async function exportReport4Pdf(){
       return fmtIDR(val) + (pct!=null ? ' (' + pct.toFixed(2).replace('.',',') + '%)' : '');
     })]),
   ];
+  // Indikator column fixed; the period columns split the rest of the page's
+  // usable width evenly and are right-aligned -- previously this table had
+  // NO columnStyles at all, so every number sat left-aligned under its
+  // header with a ragged edge, which is exactly the "nominal gak lurus"
+  // complaint. Computed from the live page width (not hardcoded) because
+  // this report switches between portrait and landscape depending on how
+  // many periods are shown.
+  const r4IndicatorW = 140;
+  const r4PageW = doc.internal.pageSize.getWidth();
+  const r4PerPeriodW = Math.max(55, (r4PageW - margin*2 - r4IndicatorW) / data.length);
+  const r4ColumnStyles = {0:{cellWidth:r4IndicatorW}};
+  data.forEach((_,i)=>{ r4ColumnStyles[i+1] = {halign:'right', cellWidth:r4PerPeriodW}; });
   doc.autoTable({
     startY: y, margin:{left:margin, right:margin},
     head, body,
     styles:{fontSize:8.5, cellPadding:5},
     headStyles:{fillColor:[107,63,34], textColor:255},
+    columnStyles: r4ColumnStyles,
     didParseCell: function(data2){ if(data2.section==='body' && data2.row.index<=2) data2.cell.styles.fontStyle='bold'; },
   });
   doc.save('KPI_Ideal_Stock_' + periodKey + '.pdf');
@@ -7664,7 +7726,7 @@ function buildReport2SheetInto(wb){
     ['ALIRE SAJIAN NUSANTARA'],
     ['Nilai Penggunaan per Divisi — ' + periodLabel(periodKey)],
     [],
-    ['Divisi','Opening Inventory','Purchase','Closing Inventory','Inventory Usage'],
+    ['Divisi','Persediaan Awal','Pembelian','Persediaan Akhir','Selisih'],
     ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'':Math.round(r.opening), Math.round(r.purchase||0), r.closing==null?'':Math.round(r.closing), r.usage==null?'':Math.round(r.usage)]),
     ['Grand Total', Math.round(grand.o), Math.round(grand.p), Math.round(grand.c), Math.round(grand.u)],
   ];
@@ -7804,7 +7866,10 @@ function drawReport1PdfSection(doc, isFirst){
       body,
       styles:{fontSize:8, cellPadding:4},
       headStyles:{fillColor:brand, textColor:255},
-      columnStyles:{0:{halign:'right', cellWidth:22},4:{halign:'right'},6:{halign:'right'},7:{halign:'right'}},
+      // Fixed widths, identical on every pass of this per-division loop --
+      // otherwise each division's table auto-sizes "Item" to its own
+      // longest item name, so columns drift between divisions down the page.
+      columnStyles:{0:{halign:'right', cellWidth:22},1:{cellWidth:120},2:{cellWidth:68},3:{cellWidth:62},4:{halign:'right', cellWidth:55},5:{cellWidth:38},6:{halign:'right', cellWidth:68},7:{halign:'right', cellWidth:72}},
       didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
     });
     y = doc.lastAutoTable.finalY + 20;
@@ -7826,14 +7891,16 @@ function drawReport2PdfSection(doc, isFirst){
   doc.setFontSize(13); doc.text('Nilai Penggunaan per Divisi — ' + periodLabel(periodKey), margin, y); y+=22;
   doc.autoTable({
     startY: y, margin:{left:margin, right:margin},
-    head: [['Divisi','Opening Inventory','Purchase','Closing Inventory','Inventory Usage']],
+    head: [['Divisi','Persediaan Awal','Pembelian','Persediaan Akhir','Selisih']],
     body: [
       ...rows.map(r=>[divisionLabel(r.id), r.opening==null?'—':fmtIDR(r.opening), fmtIDR(r.purchase||0), r.closing==null?'—':fmtIDR(r.closing), r.usage==null?'—':fmtIDR(r.usage)]),
       ['Grand Total', fmtIDR(grand.o), fmtIDR(grand.p), fmtIDR(grand.c), fmtIDR(grand.u)],
     ],
     styles:{fontSize:9, cellPadding:5},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'},4:{halign:'right'}},
+    // Fixed cellWidth per column -- sums to the page's usable width so
+    // "Divisi" and every Rupiah column keep the same boundary as the header.
+    columnStyles:{0:{cellWidth:115},1:{halign:'right',cellWidth:100},2:{halign:'right',cellWidth:100},3:{halign:'right',cellWidth:100},4:{halign:'right',cellWidth:100}},
     didParseCell: function(data){ if(data.section==='body' && data.row.index===rows.length) data.cell.styles.fontStyle='bold'; },
   });
   return true;
@@ -7852,7 +7919,8 @@ function drawReport3PdfSection(doc, isFirst){
     body: rows.map(r=>[r.label, fmtIDR(r.actual), r.hasNs?fmtIDR(r.netSales):'Net Sales belum diisi', r.hasNs?(r.actual/r.netSales*100).toFixed(2).replace('.',',')+'%':'—']),
     styles:{fontSize:9.5, cellPadding:6},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{1:{halign:'right'},2:{halign:'right'},3:{halign:'right'}},
+    // Fixed cellWidth per column -- sums to the page's usable width.
+    columnStyles:{0:{cellWidth:135},1:{halign:'right',cellWidth:130},2:{halign:'right',cellWidth:130},3:{halign:'right',cellWidth:120}},
   });
   return true;
 }
@@ -7875,11 +7943,24 @@ function drawReport4PdfSection(doc, isFirst){
       return fmtIDR(val) + (pct!=null ? ' (' + pct.toFixed(2).replace('.',',') + '%)' : '');
     })]),
   ];
+  // Indikator column fixed; the period columns split the rest of the page's
+  // usable width evenly and are right-aligned -- previously this table had
+  // NO columnStyles at all, so every number sat left-aligned under its
+  // header with a ragged edge, which is exactly the "nominal gak lurus"
+  // complaint. Computed from the live page width (not hardcoded) because
+  // this report switches between portrait and landscape depending on how
+  // many periods are shown.
+  const r4IndicatorW = 140;
+  const r4PageW = doc.internal.pageSize.getWidth();
+  const r4PerPeriodW = Math.max(55, (r4PageW - margin*2 - r4IndicatorW) / data.length);
+  const r4ColumnStyles = {0:{cellWidth:r4IndicatorW}};
+  data.forEach((_,i)=>{ r4ColumnStyles[i+1] = {halign:'right', cellWidth:r4PerPeriodW}; });
   doc.autoTable({
     startY: y, margin:{left:margin, right:margin},
     head, body,
     styles:{fontSize:8.5, cellPadding:5},
     headStyles:{fillColor:[107,63,34], textColor:255},
+    columnStyles: r4ColumnStyles,
     didParseCell: function(data2){ if(data2.section==='body' && data2.row.index<=2) data2.cell.styles.fontStyle='bold'; },
   });
   return true;
@@ -8097,7 +8178,12 @@ async function exportReportMasukPdf(){
       body,
       styles:{fontSize:8, cellPadding:4},
       headStyles:{fillColor:brand, textColor:255},
-      columnStyles:{2:{halign:'right'},4:{halign:'right'},5:{halign:'right'}},
+      // Fixed widths, identical on every pass of this per-GR-document loop --
+      // this is the exact table behind the "urutan/kolom ngaco" complaint:
+      // without a fixed width, "Barang" auto-sizes to each GR's own longest
+      // item name, so Jumlah/Satuan/Harga/Total shift sideways from one GR
+      // block to the next as the page scrolls.
+      columnStyles:{0:{cellWidth:160},1:{cellWidth:110},2:{halign:'right',cellWidth:55},3:{cellWidth:45},4:{halign:'right',cellWidth:70},5:{halign:'right',cellWidth:75}},
       didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
     });
     y = doc.lastAutoTable.finalY + 16;
@@ -8229,7 +8315,9 @@ async function exportReportKeluarPdf(){
     body,
     styles:{fontSize:8.5, cellPadding:4},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{6:{halign:'right'},7:{halign:'right'}},
+    // Fixed cellWidth per column (landscape usable width) so Jumlah/Nilai
+    // keep the same right-hand boundary as their headers.
+    columnStyles:{0:{cellWidth:70},1:{cellWidth:80},2:{cellWidth:80},3:{cellWidth:90},4:{cellWidth:90},5:{cellWidth:180},6:{halign:'right',cellWidth:65},7:{halign:'right',cellWidth:85}},
     didParseCell: function(data){ if(data.section==='body' && data.row.index===body.length-1) data.cell.styles.fontStyle='bold'; },
   });
   doc.save('Laporan_Barang_Bergerak.pdf');
@@ -8434,7 +8522,8 @@ async function exportReportWipPdf(){
     body,
     styles:{fontSize:8.5, cellPadding:4},
     headStyles:{fillColor:[107,63,34], textColor:255},
-    columnStyles:{4:{halign:'right'}},
+    // Fixed cellWidth per column (sums to the page's usable width).
+    columnStyles:{0:{cellWidth:85},1:{cellWidth:65},2:{cellWidth:85},3:{cellWidth:220},4:{halign:'right',cellWidth:60}},
   });
   doc.save('Laporan_Pencatatan_WIP.pdf');
   toast('Laporan PDF berhasil dibuat.');
@@ -8635,7 +8724,7 @@ function openReceivingModal(editDocNumber){
   const isEdit = !!editDocNumber;
   let first = null;
   if(isEdit){
-    const existingLines = state.transactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber);
+    const existingLines = sortLinesByIndex(state.transactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber));
     if(existingLines.length===0) return;
     first = existingLines[0];
     if(!canEditMaster(role)){ toast('Anda tidak dapat mengubah penerimaan ini.', true); return; }
@@ -8755,6 +8844,31 @@ function grOnItemNameInput(idx, value){
    only via Permintaan WIP / Stock Opname "Tambah Barang WIP". Shared by
    both those forms' combo boxes so neither one can suggest them. */
 function nonWipItemsPool(){ return state.items.filter(i=>i.category!=='WIP Kitchen' && i.category!=='WIP Bar'); }
+/* Permintaan Barang's item picker, unlike Penerimaan Barang's, must only
+   recommend items that are actually pullable by THIS division right now:
+   stock currently sitting in a Gudang Utama (STORAGE_WAREHOUSES) location,
+   under this division's own Peruntukan bucket or Mix Use -- never an item
+   that only exists in some division's own Gudang Divisi (DIRECT_WAREHOUSES,
+   which SR can never source from, see srItemSourcePlan), and never an item
+   that's only allocated to a DIFFERENT division's Peruntukan. There is no
+   item-master field for "which warehouse this item belongs to" (stock
+   location is purely derived from transaction history), so availability is
+   computed live from the current peruntukanIndex balances. Several Kitchen
+   sub-divisions (kitchen_wok, kitchen_pastry, ...) share one Peruntukan
+   bucket ('kitchen', division.wh) -- same mapping actionStoreRequestDoc and
+   srItemSourcePlan already use for toWarehouseId. */
+function srAvailableItemsPool(divisionId){
+  const division = divisionById(divisionId);
+  const peruntukan = division ? division.wh : divisionId;
+  if(!peruntukan) return [];
+  return nonWipItemsPool().filter(i=>{
+    return STORAGE_WAREHOUSES.some(w=>{
+      const own = stockQtyByPeruntukan(w.id, i.id, peruntukan);
+      const mix = stockQtyByPeruntukan(w.id, i.id, 'mix');
+      return (own + mix) > 0.0001;
+    });
+  });
+}
 function grRenderCombo(idx, query){
   const box = document.getElementById('grCombo'+idx);
   if(!box) return;
@@ -8999,6 +9113,12 @@ async function submitTransfer(){
 
 /* --- Permintaan Barang (multi-item) --- */
 let srLines = [];
+// Which division the item picker's recommendations (srAvailableItemsPool)
+// are scoped to -- set once when the modal opens (create: from the locked
+// division or the Divisi dropdown's default/current value; edit: from the
+// existing request's fixed division, see openEditSrModal) and kept in sync
+// by srOnDivisionChange() whenever the Divisi dropdown itself changes.
+let srDivisionId = '';
 function openStoreRequestModal(){
   const role = currentRole();
   if(!canCreateSR(role)){ toast('Peran ini tidak membuat Permintaan Barang.', true); return; }
@@ -9006,11 +9126,12 @@ function openStoreRequestModal(){
   const allowedDivisions = isMaster ? DIVISIONS : (role.divisionIds ? DIVISIONS.filter(d=>role.divisionIds.includes(d.id)) : DIVISIONS);
   const lockedDivision = (!isMaster && allowedDivisions.length===1) ? allowedDivisions[0] : null;
   srLines = [{itemId:'', qty:''}];
+  srDivisionId = lockedDivision ? lockedDivision.id : (allowedDivisions[0] ? allowedDivisions[0].id : '');
   const body = `
     <div id="srError"></div>
     ${lockedDivision
       ? `<div class="lock-note">Diminta oleh <b>${escapeHtml(lockedDivision.name)}</b> — menunggu persetujuan Gudang Utama.</div>`
-      : `<div class="field"><label>Divisi</label><select id="srDivisi">${allowedDivisions.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
+      : `<div class="field"><label>Divisi</label><select id="srDivisi" onchange="srOnDivisionChange(this.value)">${allowedDivisions.map(d=>`<option value="${d.id}">${escapeHtml(d.name)}</option>`).join('')}</select></div>`}
     <div class="field"><label>Barang</label><div id="srLinesBox"></div>
       <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="srAddLine()">+ Tambah Barang</button>
     </div>
@@ -9018,6 +9139,16 @@ function openStoreRequestModal(){
   `;
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitStoreRequestDoc()">Kirim Permintaan</button>`;
   openModal('Permintaan Barang', body, foot);
+  srRenderLines();
+}
+// Switching Divisi mid-form clears any items already picked -- an item
+// recommended/valid for the old division's Peruntukan may not even be
+// available for the new one (see srAvailableItemsPool), so keeping stale
+// picks around risks silently submitting a request for the wrong division's
+// allocation.
+function srOnDivisionChange(divisionId){
+  srDivisionId = divisionId;
+  srLines = [{itemId:'', qty:'', unit:'uom'}];
   srRenderLines();
 }
 function srAddLine(){ srLines.push({itemId:'', qty:'', unit:'uom'}); srRenderLines(); }
@@ -9075,15 +9206,23 @@ function srRenderCombo(idx, query){
   // Permintaan Barang moves real stock out of Gudang Utama -- WIP items
   // have none, so they're excluded here entirely (both WIP Kitchen and WIP
   // Bar). WIP hand-over/requests are tracked separately via Permintaan WIP.
+  // Recommendations are further scoped to srDivisionId's own Peruntukan +
+  // Mix Use stock in Gudang Utama (srAvailableItemsPool) -- never an item
+  // that's only in some division's own Gudang Divisi, and never an item
+  // allocated to a different division's Peruntukan.
   // Also exclude items already picked in another row of this same request --
   // two rows for the same item let the approval step's stock-sufficiency
   // check run against a stale snapshot for the second row (it doesn't see
   // the first row's deduction yet), which could approve a transfer for more
   // than the source location actually has.
   const takenIds = new Set(srLines.filter((l,i)=>i!==idx && l.itemId).map(l=>l.itemId));
-  const pool = nonWipItemsPool().filter(i=>!takenIds.has(i.id));
+  const pool = srAvailableItemsPool(srDivisionId).filter(i=>!takenIds.has(i.id));
   const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
-  if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
+  if(matches.length===0){
+    box.innerHTML = `<div class="combo-item" style="color:var(--text-faint); cursor:default;" onmousedown="return false;">${pool.length===0 ? 'Tidak ada barang yang saat ini tersedia di Gudang Utama untuk divisi ini.' : 'Tidak ada barang yang cocok.'}</div>`;
+    box.style.display = 'block';
+    return;
+  }
   box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="srPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
   box.style.display = 'block';
 }
