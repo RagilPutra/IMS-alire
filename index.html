@@ -204,6 +204,8 @@
   .icon-btn svg{width:14px; height:14px;}
   .icon-btn:hover{background:var(--surface-2); color:var(--text); border-color:var(--border-strong);}
   .icon-btn.icon-btn-danger:hover{background:var(--danger-tint); color:var(--danger); border-color:var(--danger-tint);}
+  .icon-btn.icon-btn-locked{opacity:.4;}
+  .icon-btn.icon-btn-locked:hover{background:var(--surface); color:var(--text-secondary); border-color:var(--border-strong);}
 
   /* ---------- KPI strip (NOT cards) ---------- */
   .kpi-strip{display:flex; border:1px solid var(--border); border-radius:var(--radius); background:var(--surface); margin-bottom:22px; overflow-x:auto;}
@@ -432,6 +434,8 @@
   .combo-item{padding:8px 11px; font-size:12.5px; font-weight:600; cursor:pointer; border-bottom:1px solid var(--border);}
   .combo-item:last-child{border-bottom:none;}
   .combo-item:hover{background:var(--surface-2);}
+  .combo-item.active{background:var(--brand); color:#fff;}
+  .combo-item.active span{color:#fff !important; opacity:.8;}
 
   /* ---------- Drawer ---------- */
   .drawer-backdrop{position:fixed; inset:0; background:rgba(23,17,10,.3); display:none; z-index:45;}
