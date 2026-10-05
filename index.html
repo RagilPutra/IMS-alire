@@ -4532,7 +4532,35 @@ function renderOpnameCorrect(){
     <div class="lock-note" style="margin-bottom:14px; background:var(--warning-tint); color:var(--warning); border:1px solid var(--warning);">
       Mengoreksi hasil opname <b>${escapeHtml(whName(locationId))} — ${escapeHtml(periodLabel(periodKey))}</b> yang sudah dikunci dan menjadi data final. Stok saat ini hanya akan disesuaikan sebesar <b>selisih</b> antara angka lama dan angka baru di sini — transaksi lain yang terjadi setelah dikunci tidak akan ketimpa. Gunakan hanya untuk memperbaiki kesalahan input.
     </div>
+    ${canAddNew ? `
     <div class="panel">
+      <div class="panel-head">
+        <h3>Barang Baru / Terlewat <span style="font-weight:600; color:var(--text-secondary); font-size:12px;">(khusus ${escapeHtml(whName(locationId))})</span></h3>
+        <span class="panel-total" style="display:flex; gap:8px;">
+          <button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectItemModal()">${ICONS.plus} Tambah Barang</button>
+          ${wipCategory ? `<button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectWipModal()">${ICONS.plus} Tambah Barang WIP</button>` : ''}
+        </span>
+      </div>
+      <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Untuk barang yang ternyata terlewat sama sekali dari hitung fisik awal (bukan salah angka pada barang yang sudah tercatat). "Tambah Barang" ikut menambah stok/inventory sebenarnya begitu koreksi ini disimpan; "Tambah Barang WIP" hanya menambah nilai tercatat, tidak memengaruhi stok. Keduanya baru benar-benar tersimpan setelah "Simpan Koreksi" di bawah ditekan.</div>
+      ${opnameCorrectNewItems.length===0 ? `<div class="empty-row" style="padding:16px;">Belum ada barang baru yang ditambahkan.</div>` : `
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Barang</th><th>Jenis</th>${isStorageLoc?'<th>Peruntukan</th>':''}<th>Satuan</th><th class="num">Jumlah Fisik</th><th class="num">Harga Total</th><th></th></tr></thead>
+          <tbody>
+            ${opnameCorrectNewItems.map(ni=>`<tr>
+              <td class="cell-title">${escapeHtml(ni.itemName)}</td>
+              <td>${ni.addedType==='wip' ? 'WIP' : 'Tambahan'}</td>
+              ${isStorageLoc?`<td>${ni.peruntukan?peruntukanName(ni.peruntukan):'—'}</td>`:''}
+              <td>${escapeHtml(ni.uom||'')}</td>
+              <td class="num">${fmtNum(ni.qty)}</td>
+              <td class="num">${fmtIDR(ni.price||0)}</td>
+              <td><button type="button" class="btn btn-sm btn-quiet" title="Hapus" onclick="removeOpnameCorrectNewItem('${ni.itemId}')">${ICONS.trash}</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`}
+    </div>` : ''}
+    <div class="panel" style="margin-top:14px;">
       <div class="panel-head"><h3>Koreksi Hitung Fisik — ${escapeHtml(whName(locationId))}</h3></div>
       <div class="filter-row">
         <input type="text" id="opnameCorrectSearchInput" placeholder="Cari barang…" value="${escapeHtml(state.opnameCorrectSearch||'')}" oninput="setOpnameCorrectSearch(this.value)">
@@ -4563,34 +4591,6 @@ function renderOpnameCorrect(){
         </table>
       </div>
     </div>
-    ${canAddNew ? `
-    <div class="panel" style="margin-top:14px;">
-      <div class="panel-head">
-        <h3>Barang Baru / Terlewat <span style="font-weight:600; color:var(--text-secondary); font-size:12px;">(khusus ${escapeHtml(whName(locationId))})</span></h3>
-        <span class="panel-total" style="display:flex; gap:8px;">
-          <button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectItemModal()">${ICONS.plus} Tambah Barang</button>
-          ${wipCategory ? `<button class="btn btn-sm btn-outline" onclick="openAddOpnameCorrectWipModal()">${ICONS.plus} Tambah Barang WIP</button>` : ''}
-        </span>
-      </div>
-      <div class="lock-note" style="margin:0; border-radius:0; border-left:none; border-right:none; border-top:none;">Untuk barang yang ternyata terlewat sama sekali dari hitung fisik awal (bukan salah angka pada barang yang sudah tercatat). "Tambah Barang" ikut menambah stok/inventory sebenarnya begitu koreksi ini disimpan; "Tambah Barang WIP" hanya menambah nilai tercatat, tidak memengaruhi stok. Keduanya baru benar-benar tersimpan setelah "Simpan Koreksi" di bawah ditekan.</div>
-      ${opnameCorrectNewItems.length===0 ? `<div class="empty-row" style="padding:16px;">Belum ada barang baru yang ditambahkan.</div>` : `
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Barang</th><th>Jenis</th>${isStorageLoc?'<th>Peruntukan</th>':''}<th>Satuan</th><th class="num">Jumlah Fisik</th><th class="num">Harga Total</th><th></th></tr></thead>
-          <tbody>
-            ${opnameCorrectNewItems.map(ni=>`<tr>
-              <td class="cell-title">${escapeHtml(ni.itemName)}</td>
-              <td>${ni.addedType==='wip' ? 'WIP' : 'Tambahan'}</td>
-              ${isStorageLoc?`<td>${ni.peruntukan?peruntukanName(ni.peruntukan):'—'}</td>`:''}
-              <td>${escapeHtml(ni.uom||'')}</td>
-              <td class="num">${fmtNum(ni.qty)}</td>
-              <td class="num">${fmtIDR(ni.price||0)}</td>
-              <td><button type="button" class="btn btn-sm btn-quiet" title="Hapus" onclick="removeOpnameCorrectNewItem('${ni.itemId}')">${ICONS.trash}</button></td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>`}
-    </div>` : ''}
     <div class="action-row" style="justify-content:flex-end; gap:8px;">
       <button class="btn btn-outline" onclick="backToOpnameList()">Batal</button>
       <button class="btn btn-primary" onclick="confirmSaveOpnameCorrection()">Simpan Koreksi</button>
@@ -9938,7 +9938,7 @@ function grRenderLines(){
     return `
     <div style="display:grid; grid-template-columns: ${cols}; gap:6px; margin-bottom:6px; align-items:start;">
       <div class="combo-wrap">
-        <input type="text" id="grItemInput${idx}" placeholder="Nama barang" value="${escapeHtml(line.itemName)}"
+        <input type="text" id="grItemInput${idx}" placeholder="Nama barang" value="${escapeHtml(line.itemName)}" autocomplete="off"
           oninput="grOnItemNameInput(${idx}, this.value)"
           onfocus="grRenderCombo(${idx}, this.value)"
           onblur="setTimeout(()=>grCloseCombo(${idx}), 150)"
@@ -10130,7 +10130,7 @@ function openTransferModal(){
     <div class="field">
       <label>Barang</label>
       <div class="combo-wrap">
-        <input type="text" id="tfItemInput" placeholder="Ketik untuk mencari barang…" oninput="tfOnItemInput(this.value)" onfocus="tfRenderCombo(this.value)" onblur="setTimeout(()=>tfCloseCombo(), 150)" onkeydown="comboKeyNav(event,'tfCombo')">
+        <input type="text" id="tfItemInput" placeholder="Ketik untuk mencari barang…" autocomplete="off" oninput="tfOnItemInput(this.value)" onfocus="tfRenderCombo(this.value)" onblur="setTimeout(()=>tfCloseCombo(), 150)" onkeydown="comboKeyNav(event,'tfCombo')">
         <input type="hidden" id="tfItem">
         <div class="combo-list" id="tfCombo"></div>
       </div>
@@ -10307,7 +10307,7 @@ function srRenderLines(){
     return `
     <div style="display:grid; grid-template-columns: 2fr .7fr ${hasSmall?'.9fr':'.6fr'} auto; gap:6px; margin-bottom:2px; align-items:start;">
       <div class="combo-wrap">
-        <input type="text" id="srItemInput${idx}" placeholder="Ketik untuk mencari barang…" value="${selected?escapeHtml(selected.name):''}"
+        <input type="text" id="srItemInput${idx}" placeholder="Ketik untuk mencari barang…" value="${selected?escapeHtml(selected.name):''}" autocomplete="off"
           oninput="srOnItemInput(${idx}, this.value)"
           onfocus="srRenderCombo(${idx}, this.value)"
           onblur="setTimeout(()=>srCloseCombo(${idx}), 150)"
@@ -10608,7 +10608,7 @@ function wipReqRenderLines(){
     return `
     <div style="display:grid; grid-template-columns: 2fr .7fr ${hasSmall?'.9fr':'.6fr'} auto; gap:6px; margin-bottom:2px; align-items:start;">
       <div class="combo-wrap">
-        <input type="text" id="wipReqItemInput${idx}" placeholder="Ketik untuk mencari barang WIP…" value="${selected?escapeHtml(selected.name):''}"
+        <input type="text" id="wipReqItemInput${idx}" placeholder="Ketik untuk mencari barang WIP…" value="${selected?escapeHtml(selected.name):''}" autocomplete="off"
           oninput="wipReqOnItemInput(${idx}, this.value)"
           onfocus="wipReqRenderCombo(${idx}, this.value)"
           onblur="setTimeout(()=>wipReqCloseCombo(${idx}), 150)"
