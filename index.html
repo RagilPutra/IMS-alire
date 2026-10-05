@@ -1134,6 +1134,33 @@ function canDeleteSR(role, sr){
 }
 function canReceive(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canEditMaster(role){ return role.kind==='master' || role.kind==='receiving'; }
+/* True when isoString falls on today's calendar date in Asia/Jakarta,
+   regardless of what timezone the browser itself is running in. */
+function isSameJakartaDay(isoString){
+  if(!isoString) return false;
+  const fmt = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Jakarta', year:'numeric', month:'2-digit', day:'2-digit'});
+  return fmt.format(new Date(isoString)) === fmt.format(new Date());
+}
+/* Editing AND deleting a receipt share canEditMaster's reach (Master/
+   Receiving), same as before -- but Receiving's reach here is additionally
+   capped to the SAME CALENDAR DAY (Asia/Jakarta) the receipt was created.
+   This is a deliberate guard against backdated changes: once a price-only
+   edit stopped being blocked by stock availability (see
+   actionEditReceivingDoc), Receiving could otherwise freely rewrite a GR
+   from months ago. Master keeps the standing, unrestricted ability to fix
+   anything after the fact -- same asymmetry as Edit Stok and Koreksi Opname
+   Terkunci elsewhere in the app -- so Receiving's only path past this window
+   is asking Master. doc is a GR line (any line of the document; createdAt is
+   the same across all of a document's lines). */
+function canEditReceivingDoc(role, doc){
+  if(!doc) return false;
+  if(role.kind==='master') return true;
+  if(role.kind==='receiving') return isSameJakartaDay(doc.createdAt);
+  return false;
+}
+function receivingEditLockedNotice(){
+  toast('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubah atau menghapusnya.', true);
+}
 /* Every role can view Dashboard except a plain division account -- Service
    Leader is the one division-kind exception (it also oversees several
    divisions' inventory, see allowedInventoryWarehouseIds below), and gets
@@ -1214,6 +1241,18 @@ function canCreateWipRequest(role){ return role.kind==='master' || role.kind==='
 function canDeleteWip(role, w){
   if(!w || w.status!=='menunggu') return false;
   if(role.kind==='master') return true;
+  if(role.kind==='receiving') return true;
+  if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
+  if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
+  return false;
+}
+/* Editing mirrors canEditSR's reach exactly (Receiving, Kitchen Leader of the
+   owning division, and the requesting divisi itself) -- Master is covered by
+   canDeleteWip's own standing admin bypass instead, same asymmetry as
+   canEditSR/canDeleteSR for Permintaan Barang (SR). */
+function canEditWip(role, w){
+  if(!w || w.status!=='menunggu') return false;
+  if(role.kind==='receiving') return true;
   if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
   if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
   return false;
@@ -1873,6 +1912,9 @@ async function actionEditReceivingDoc(docNumber, payload){
   const existingLines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
   const first = existingLines[0];
+  // Defensive re-check (openReceivingModal already gated opening the form on
+  // this) -- same-day-only for Receiving, Master unrestricted.
+  if(!canEditReceivingDoc(currentRole(), first)) throw new Error('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master.');
   const keepIds = new Set();
   // payload.lines is in the order shown/edited in the form -- write that
   // position back as each line's lineIndex (see actionReceivingDoc) so the
@@ -1885,15 +1927,28 @@ async function actionEditReceivingDoc(docNumber, payload){
     if(line._txId){
       keepIds.add(line._txId);
       const orig = existingLines.find(e=>e.id===line._txId);
-      if(orig){
-        const origPeruntukan = isStorageWarehouse(orig.toWarehouseId) ? (orig.peruntukan||'mix') : null;
-        try{
-          await adjustStock(orig.toWarehouseId, orig.itemId, -(orig.qty||0), origPeruntukan);
-        }catch(revErr){
-          throw new Error('Tidak bisa mengubah baris "' + orig.itemName + '": ' + revErr.message + ' (barang ini kemungkinan sudah dipindah/dipakai di tempat lain sejak diterima).');
+      const origPeruntukan = orig ? (isStorageWarehouse(orig.toWarehouseId) ? (orig.peruntukan||'mix') : null) : null;
+      // A line whose qty/lokasi/peruntukan are all unchanged from the
+      // original never needs its stock effect touched at all -- only Harga
+      // (and/or supplier/note/doNumber/etc, none of which move stock)
+      // changed. Skipping the reverse-then-reapply dance below is what lets
+      // Master fix a price typo on a line whose stock has since moved (e.g.
+      // already drawn down via Permintaan Barang/SR) without the edit
+      // failing on a stock-availability check that was never relevant to a
+      // price-only change in the first place -- reversing+reapplying the
+      // exact same qty/bucket is a net no-op anyway, so skipping it changes
+      // nothing about the resulting stock.
+      const stockUnchanged = !!orig && Math.abs((line.qty||0)-(orig.qty||0))<0.0005 && line.locationId===orig.toWarehouseId && peruntukan===origPeruntukan;
+      if(!stockUnchanged){
+        if(orig){
+          try{
+            await adjustStock(orig.toWarehouseId, orig.itemId, -(orig.qty||0), origPeruntukan);
+          }catch(revErr){
+            throw new Error('Tidak bisa mengubah baris "' + orig.itemName + '": ' + revErr.message + ' (barang ini kemungkinan sudah dipindah/dipakai di tempat lain sejak diterima).');
+          }
         }
+        await adjustStock(line.locationId, item.id, line.qty, peruntukan);
       }
-      await adjustStock(line.locationId, item.id, line.qty, peruntukan);
       if(line.price>0) await setItemLastPrice(item.id, line.price);
       await db.doc('transactions/'+line._txId).update({
         itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty, lineIndex: idx,
@@ -1936,13 +1991,21 @@ async function actionEditReceivingDoc(docNumber, payload){
 function confirmDeleteReceiving(docNumber){
   const lines = state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(lines.length===0) return;
-  if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
+  const role = currentRole();
+  if(!canEditReceivingDoc(role, lines[0])){
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    return;
+  }
   openConfirm('Hapus Penerimaan', `Hapus Penerimaan ${docNumber}? Stok yang sudah masuk dari dokumen ini akan dikurangi kembali. Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteReceiving(docNumber), 'Hapus', true);
 }
 async function actionDeleteReceiving(docNumber){
   const lines = state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber);
   if(lines.length===0) return;
-  if(!canEditMaster(currentRole())){ toast('Anda tidak dapat menghapus penerimaan ini.', true); return; }
+  const role = currentRole();
+  if(!canEditReceivingDoc(role, lines[0])){
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    return;
+  }
   try{
     for(const line of lines){
       const peruntukan = isStorageWarehouse(line.toWarehouseId) ? (line.peruntukan||'mix') : null;
@@ -4353,25 +4416,34 @@ function renderOpnameCounting(){
    tetap tidak bisa dikoreksi di sini (lihat filter !it.addedType di
    renderOpnameCorrect) -- tapi Master sekarang BISA menambah barang/WIP BARU
    yang terlewat lewat tombol "Tambah Barang"/"Tambah Barang WIP" di bawah,
-   khusus untuk Kitchen & Bar (lihat OPNAME_CORRECT_ADD_LOCATIONS di bawah,
-   opnameCorrectNewItems, dan openAddOpnameCorrectItemModal/
-   openAddOpnameCorrectWipModal). */
+   untuk SEMUA lokasi termasuk Gudang Utama (lihat OPNAME_CORRECT_ADD_LOCATIONS
+   di bawah, opnameCorrectNewItems, dan openAddOpnameCorrectItemModal/
+   openAddOpnameCorrectWipModal -- Gudang Utama tambahan juga meminta pilihan
+   Peruntukan karena, tidak seperti lokasi konsumsi langsung, lokasinya sendiri
+   bukan satu divisi tunggal). */
 let opnameCorrectDetail = null;
 let opnameCorrectQty = {};
 let opnameCorrectLoading = false;
-// Newly-added items staged in the locked-correction screen (Kitchen/Bar
-// only) via "Tambah Barang"/"Tambah Barang WIP" below -- NOT part of the
+// Newly-added items staged in the locked-correction screen (any location)
+// via "Tambah Barang"/"Tambah Barang WIP" below -- NOT part of the
 // original opnameDetails.items yet, only merged in when Simpan Koreksi runs
 // (saveOpnameCorrection). Each entry: {itemId, itemName, kode, uom,
 // qty (display unit, same idea as opnameCorrectQty), price (manual Harga
-// Total override, same idea as opnameAddedPrice), addedType:'goods'|'wip'}.
+// Total override, same idea as opnameAddedPrice), addedType:'goods'|'wip',
+// peruntukan (only set for a 'goods' item added at a Gudang Utama location)}.
 let opnameCorrectNewItems = [];
-// Adding a brand-new item into an already-locked opname is only opened up
-// for Kitchen & Bar -- the two direct-consumption locations where a missed
-// item during the original physical count is both common and, unlike a
-// Gudang Utama, doesn't need a Peruntukan choice (the location itself
-// already IS the divisi).
-const OPNAME_CORRECT_ADD_LOCATIONS = ['kitchen','bar'];
+// Adding a brand-new item into an already-locked opname is open to every
+// location, Gudang Utama (storage) included -- a missed item discovered
+// days after the count, once stock has already moved, isn't unique to
+// Kitchen & Bar. A storage location additionally needs a Peruntukan choice
+// on "Tambah Barang" (see the isStorage branches in
+// openAddOpnameCorrectItemModal/submitAddOpnameCorrectItem/
+// saveOpnameCorrection below), since unlike a direct-consumption location the
+// location itself isn't already a single divisi. "Tambah Barang WIP" stays
+// naturally Kitchen/Bar-only without any extra gating here: wipCategoryFor()
+// returns null for every other location, so that button simply never renders
+// anywhere else.
+const OPNAME_CORRECT_ADD_LOCATIONS = WAREHOUSES.map(w=>w.id);
 function openOpnameCorrection(locationId, periodKey){
   const role = currentRole();
   if(role.kind!=='master'){ toast('Hanya Master User yang dapat mengoreksi opname yang sudah terkunci.', true); return; }
@@ -4446,13 +4518,15 @@ function renderOpnameCorrect(){
   // berikutnya (saat itu barangnya sudah jadi barang sistem biasa, bukan
   // "Tambahan" lagi). Ini terpisah dari menambah barang BARU yang terlewat
   // sama sekali dari opname awal, yang sekarang bisa lewat "Tambah Barang"/
-  // "Tambah Barang WIP" di bawah (Kitchen & Bar saja) -- lihat
+  // "Tambah Barang WIP" di bawah (semua lokasi; "Tambah Barang WIP" sendiri
+  // tetap cuma muncul untuk Kitchen & Bar, lihat wipCategoryFor) -- lihat
   // opnameCorrectNewItems.
   let items = (detail.items||[]).filter(it=>!it.addedType);
   if(q) items = items.filter(it=>(it.itemName||'').toLowerCase().includes(q) || (it.kode||'').toLowerCase().includes(q));
   items = items.slice().sort((a,b)=>(a.itemName||'').localeCompare(b.itemName||''));
   const canAddNew = OPNAME_CORRECT_ADD_LOCATIONS.includes(locationId);
   const wipCategory = canAddNew ? wipCategoryFor(locationId) : null;
+  const isStorageLoc = isStorageWarehouse(locationId);
 
   document.getElementById('content').innerHTML = `
     <div class="lock-note" style="margin-bottom:14px; background:var(--warning-tint); color:var(--warning); border:1px solid var(--warning);">
@@ -4502,11 +4576,12 @@ function renderOpnameCorrect(){
       ${opnameCorrectNewItems.length===0 ? `<div class="empty-row" style="padding:16px;">Belum ada barang baru yang ditambahkan.</div>` : `
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Barang</th><th>Jenis</th><th>Satuan</th><th class="num">Jumlah Fisik</th><th class="num">Harga Total</th><th></th></tr></thead>
+          <thead><tr><th>Barang</th><th>Jenis</th>${isStorageLoc?'<th>Peruntukan</th>':''}<th>Satuan</th><th class="num">Jumlah Fisik</th><th class="num">Harga Total</th><th></th></tr></thead>
           <tbody>
             ${opnameCorrectNewItems.map(ni=>`<tr>
               <td class="cell-title">${escapeHtml(ni.itemName)}</td>
               <td>${ni.addedType==='wip' ? 'WIP' : 'Tambahan'}</td>
+              ${isStorageLoc?`<td>${ni.peruntukan?peruntukanName(ni.peruntukan):'—'}</td>`:''}
               <td>${escapeHtml(ni.uom||'')}</td>
               <td class="num">${fmtNum(ni.qty)}</td>
               <td class="num">${fmtIDR(ni.price||0)}</td>
@@ -4543,6 +4618,7 @@ let addOpnameCorrectItemHargaTouched = false;
 function openAddOpnameCorrectItemModal(){
   const locationId = state.opnameCorrectLocation;
   if(!OPNAME_CORRECT_ADD_LOCATIONS.includes(locationId)) return;
+  const isStorage = isStorageWarehouse(locationId);
   const taken = opnameCorrectTakenItemIds();
   // Same WIP-category exclusion as the live-counting "Tambah Barang" modal --
   // WIP can only be added through "Tambah Barang WIP" below.
@@ -4556,6 +4632,10 @@ function openAddOpnameCorrectItemModal(){
     <div class="lock-note" style="margin:0 0 12px;">Untuk barang yang ternyata terlewat sama sekali dari hitung fisik ${escapeHtml(whName(locationId))} — ${escapeHtml(periodLabel(state.opnameCorrectPeriod))}. Baru benar-benar tersimpan (dan ikut menyesuaikan stok) setelah "Simpan Koreksi" ditekan.</div>
     <div class="field"><label>Cari Barang</label><input type="text" id="addOpnameCorrectItemSearch" placeholder="Ketik nama barang…" oninput="filterAddOpnameCorrectItemSelect(this.value)"></div>
     <div class="field"><label>Barang (${available.length} tersedia)</label><select id="addOpnameCorrectItemSelect" size="8" style="height:auto;" onchange="onAddOpnameCorrectItemSelectChange()">${available.map(i=>`<option value="${i.id}">${escapeHtml(i.name)}${i.category?' — '+escapeHtml(i.category):''}</option>`).join('')}</select></div>
+    ${isStorage ? `<div class="field"><label>Peruntukan</label><select id="addOpnameCorrectItemPeruntukan">
+        <option value="" selected disabled>Pilih Peruntukan…</option>
+        ${PERUNTUKAN_OPTIONS.map(p=>`<option value="${p.id}">${p.name}</option>`).join('')}
+      </select></div>` : ''}
     <div class="two-col">
       <div class="field"><label>Jumlah Fisik <span class="cell-sub" id="addOpnameCorrectItemUnitLabel"></span></label><input type="number" id="addOpnameCorrectItemQty" inputmode="decimal" min="0" step="any" placeholder="0" oninput="onAddOpnameCorrectItemQtyInput()"></div>
       <div class="field"><label>Harga Total (opsional)</label><input type="text" inputmode="numeric" id="addOpnameCorrectItemHarga" placeholder="0" oninput="formatPriceInput(this); addOpnameCorrectItemHargaTouched=true;"></div>
@@ -4594,6 +4674,7 @@ function filterAddOpnameCorrectItemSelect(q){
   Array.from(sel.options).forEach(opt=>{ opt.style.display = opt.textContent.toLowerCase().includes(q) ? '' : 'none'; });
 }
 function submitAddOpnameCorrectItem(){
+  const locationId = state.opnameCorrectLocation;
   const sel = document.getElementById('addOpnameCorrectItemSelect');
   const itemId = sel ? sel.value : '';
   const qty = parseFloat(document.getElementById('addOpnameCorrectItemQty').value) || 0;
@@ -4601,10 +4682,16 @@ function submitAddOpnameCorrectItem(){
   const item = itemById(itemId);
   if(!item){ err.innerHTML = errBox('Pilih barang terlebih dahulu.'); return; }
   if(qty <= 0){ err.innerHTML = errBox('Jumlah fisik harus lebih dari 0.'); return; }
+  let peruntukan = null;
+  if(isStorageWarehouse(locationId)){
+    const perEl = document.getElementById('addOpnameCorrectItemPeruntukan');
+    peruntukan = perEl ? perEl.value : '';
+    if(!peruntukan){ err.innerHTML = errBox('Pilih Peruntukan terlebih dahulu.'); return; }
+  }
   const hargaEl = document.getElementById('addOpnameCorrectItemHarga');
   opnameCorrectNewItems.push({
     itemId, itemName: item.name, kode: item.kode||'', uom: srHasSmallUnit(item) ? item.smallUnit : item.uom,
-    qty, price: hargaEl ? parsePriceInput(hargaEl.value) : 0, addedType: 'goods',
+    qty, price: hargaEl ? parsePriceInput(hargaEl.value) : 0, addedType: 'goods', peruntukan,
   });
   closeModal();
   render();
@@ -4759,7 +4846,7 @@ async function saveOpnameCorrection(){
         }
       }
     }
-    // Barang baru (Kitchen/Bar saja, lihat OPNAME_CORRECT_ADD_LOCATIONS) yang
+    // Barang baru (semua lokasi, lihat OPNAME_CORRECT_ADD_LOCATIONS) yang
     // di-stage lewat "Tambah Barang"/"Tambah Barang WIP" di atas -- sama
     // perlakuannya dengan actionSubmitOpnameCount's 'goods'/'wip' handling:
     // 'goods' langsung menambah stok (system dianggap 0 karena barang ini
@@ -4775,22 +4862,38 @@ async function saveOpnameCorrection(){
       const value = ni.price!=null ? ni.price : physical * (item.lastPrice||0);
       if(ni.addedType==='wip') addedWipValueDelta += value;
       else addedGoodsValueDelta += value;
+      // For a Gudang Utama location, ni.peruntukan was required and validated
+      // at submitAddOpnameCorrectItem -- never a silent 'mix' fallback here.
+      // Snapshot the per-bucket breakdown BEFORE writing (same reasoning as
+      // splitForSnapshot above: a snapshot taken after the write could drift
+      // from what was actually applied), with the new item's whole quantity
+      // landing in the one bucket the counter actually chose -- same as
+      // actionSubmitOpnameCount's goodsPeruntukan handling for a live count.
+      let peruntukanQty = null;
+      if(isStorage && ni.addedType==='goods'){
+        peruntukanQty = {};
+        PERUNTUKAN_OPTIONS.forEach(p=>{ peruntukanQty[p.id] = stockQtyByPeruntukan(locationId, ni.itemId, p.id); });
+        peruntukanQty[ni.peruntukan] = (peruntukanQty[ni.peruntukan]||0) + physical;
+        if(peruntukanValues) peruntukanValues[ni.peruntukan] = (peruntukanValues[ni.peruntukan]||0) + value;
+      }
       newItems.push({
         itemId: ni.itemId, itemName: item.name, kode: item.kode||'', uom: item.uom||'',
         systemQty: 0, physicalQty: physical, selisih: physical,
         price: item.lastPrice||0, nilaiFisik: value, nilaiSelisih: value,
         addedType: ni.addedType,
+        ...(isStorage && ni.addedType==='goods' ? {addedPeruntukan: ni.peruntukan} : {}),
+        ...(peruntukanQty ? {peruntukanQty} : {}),
       });
       if(ni.addedType==='goods'){
-        // OPNAME_CORRECT_ADD_LOCATIONS is Kitchen/Bar only (never a Gudang
-        // Utama), so there's no Peruntukan bucket to pick -- same as the
+        // Everywhere else (direct-consumption locations) the location itself
+        // is already a single divisi, so null is correct, same as the
         // non-storage branch just above.
-        await adjustStock(locationId, ni.itemId, physical, null, {allowNegative:true});
+        await adjustStock(locationId, ni.itemId, physical, isStorage ? ni.peruntukan : null, {allowNegative:true});
         await logTx({
           type:'opname', status:'completed',
           itemId: ni.itemId, itemName: item.name, uom: item.uom, qty: Math.abs(physical),
           toWarehouseId: locationId, toWarehouseName: whName(locationId),
-          note: 'Koreksi Master atas Stok Opname ' + periodLabel(periodKey) + ' (terkunci) — barang terlewat ditambahkan: ' + fmtNum(physical) + ' ' + item.uom,
+          note: 'Koreksi Master atas Stok Opname ' + periodLabel(periodKey) + ' (terkunci) — barang terlewat ditambahkan: ' + fmtNum(physical) + ' ' + item.uom + (isStorage ? ' (' + peruntukanName(ni.peruntukan) + ')' : ''),
         });
       }
       // 'wip' tidak pernah menyentuh stok nyata, persis seperti submitAddWip().
@@ -6104,8 +6207,11 @@ function renderWipRequests(){
                         <button class="btn btn-sm btn-danger-outline" onclick="openRejectWipModal('${d.docNumber}')">Tolak</button>
                       </div>`;
                     }
-                    if(isPending && canDeleteWip(role, first)){
-                      return `<div onclick="event.stopPropagation()"><button class="btn btn-sm btn-danger-outline" onclick="confirmDeleteWip('${d.docNumber}')">Hapus</button></div>`;
+                    if(isPending && (canEditWip(role, first) || canDeleteWip(role, first))){
+                      return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
+                        ${canEditWip(role, first) ? `<button class="btn btn-sm btn-outline" onclick="openEditWipModal('${d.docNumber}')">Edit</button>` : ''}
+                        ${canDeleteWip(role, first) ? `<button class="btn btn-sm btn-danger-outline" onclick="confirmDeleteWip('${d.docNumber}')">Hapus</button>` : ''}
+                      </div>`;
                     }
                     return '';
                   })()}</td>
@@ -6324,7 +6430,8 @@ function openWipDetail(docNumber){
         const primary = l.requestedUnit ? (fmtNum(l.requestedQty) + ' ' + escapeHtml(l.requestedUnit)) : (fmtNum(l.qty) + ' ' + escapeHtml(l.uom||''));
         const sub = l.requestedUnit ? `<div class="cell-sub">≈ ${fmtNum(l.qty)} ${escapeHtml(l.uom||'')}</div>` : '';
         const requesterNote = l.note ? `<div class="cell-sub">Catatan: ${escapeHtml(l.note)}</div>` : '';
-        return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}</td><td class="num">${primary}${sub}</td></tr>`;
+        const leaderNoteHtml = l.leaderNote ? `<div class="cell-sub" style="color:var(--brand-dark); font-weight:700;">Catatan Kitchen Leader${l.leaderNoteBy?' ('+escapeHtml(l.leaderNoteBy)+')':''}: ${escapeHtml(l.leaderNote)}</div>` : '';
+        return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}${leaderNoteHtml}</td><td class="num">${primary}${sub}</td></tr>`;
       }).join('')}</tbody></table>
     </div>
     <div style="margin-top:12px;">Status: ${wipStatusTag(first)}</div>
@@ -6337,6 +6444,7 @@ function openWipDetail(docNumber){
   const gatePending = isWipGatePending(first);
   let foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
   if(canDeleteWip(role, first)) foot += `<button class="btn btn-danger-outline" onclick="closeModal(); confirmDeleteWip('${docNumber}')">Hapus</button>`;
+  if(canEditWip(role, first)) foot += `<button class="btn btn-outline" onclick="closeModal(); openEditWipModal('${docNumber}')">Edit</button>`;
   if(first.status==='menunggu' && gatePending && canGate){
     foot += `<button class="btn btn-danger-outline" onclick="closeModal(); openRejectWipModal('${docNumber}')">Tolak</button><button class="btn btn-primary" onclick="closeModal(); confirmApproveWipGate('${docNumber}')">Setujui</button>`;
   } else if(first.status==='menunggu' && !gatePending && canApprove){
@@ -6387,6 +6495,7 @@ function renderReceiving(){
               pageDocs.map(d=>{
                 const first = d.lines[0];
                 const total = d.lines.reduce((s,l)=>s+(l.totalValue||0),0);
+                const docEditable = canEditReceivingDoc(role, first);
                 // Supplier and date are groupers here, not columns -- this page is
                 // meant to be read down to the item level; the per-supplier / per-
                 // period summary view belongs to Laporan Barang Masuk instead.
@@ -6399,8 +6508,8 @@ function renderReceiving(){
                         <span class="cell-sub" style="margin-left:8px;">${fmtDate(d.createdAt)} · ${escapeHtml(first.supplierName||'Tanpa Supplier')}${first.doNumber?' · DO '+escapeHtml(first.doNumber):''}</span>
                       </div>
                       ${canEditR ? `<div style="display:flex; gap:6px; flex-shrink:0;" onclick="event.stopPropagation()">
-                        <button class="icon-btn" title="Edit" onclick="openReceivingModal('${d.docNumber}')">${ICONS.edit}</button>
-                        <button class="icon-btn icon-btn-danger" title="Hapus" onclick="confirmDeleteReceiving('${d.docNumber}')">${ICONS.trash}</button>
+                        <button class="icon-btn ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Edit':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`openReceivingModal('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.edit:ICONS.lock}</button>
+                        <button class="icon-btn icon-btn-danger ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Hapus':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`confirmDeleteReceiving('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.trash:ICONS.lock}</button>
                       </div>` : ''}
                     </div>
                   </td>
@@ -9588,8 +9697,10 @@ function grConfirmDeleteDraft(draftId){
 }
 /* editDocNumber: when set, prefills the form from an existing 'in' document
    and routes submit to actionEditReceivingDoc instead of creating a new one.
-   Editing/deleting a receipt is restricted to canEditMaster (Master/Receiving)
-   -- same reach as who can already add a late attachment to one. draftId:
+   Editing/deleting a receipt is gated by canEditReceivingDoc (Master anytime,
+   Receiving same-day-only -- see its own comment) -- a late PDF attachment
+   stays canEditMaster's plain, unrestricted reach, since attaching a scanned
+   invoice days later never changes any recorded qty/price/stock. draftId:
    when set (and not editing), resumes that specific saved draft -- passed
    by clicking an entry in the draft list rendered on the Receiving page. */
 function openReceivingModal(editDocNumber, draftId){
@@ -9601,7 +9712,10 @@ function openReceivingModal(editDocNumber, draftId){
     const existingLines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===editDocNumber));
     if(existingLines.length===0) return;
     first = existingLines[0];
-    if(!canEditMaster(role)){ toast('Anda tidak dapat mengubah penerimaan ini.', true); return; }
+    if(!canEditReceivingDoc(role, first)){
+      toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubahnya.' : 'Anda tidak dapat mengubah penerimaan ini.', true);
+      return;
+    }
     receivingLines = existingLines.map(l=>({
       _txId: l.id, itemName: l.itemName, qty: String(l.qty), uom: l.uom, price: l.price||'',
       category: (itemById(l.itemId)||{}).category || 'Supplies', peruntukan: l.peruntukan || 'mix',
@@ -9633,7 +9747,8 @@ function openReceivingModal(editDocNumber, draftId){
           <input type="text" id="grSupplierInput" placeholder="Ketik nama supplier…" autocomplete="off" value="${isEdit?escapeHtml(first.supplierName||''):escapeHtml(draft?draft.supplierName||'':'')}"
             oninput="grOnSupplierInput(this.value)"
             onfocus="grRenderSupplierCombo(this.value)"
-            onblur="setTimeout(()=>grCloseSupplierCombo(), 150)">
+            onblur="setTimeout(()=>grCloseSupplierCombo(), 150)"
+            onkeydown="comboKeyNav(event,'grSupplierCombo')">
           <div class="combo-list" id="grSupplierCombo"></div>
         </div>
         <input type="hidden" id="grSupplier" value="${isEdit?(first.supplierId||''):(draft?draft.supplierId||'':'')}">
@@ -9761,6 +9876,7 @@ function srAvailableItemsPool(divisionId){
 function grRenderCombo(idx, query){
   const box = document.getElementById('grCombo'+idx);
   if(!box) return;
+  _comboNavIdx = -1;
   const q = (query||'').trim().toLowerCase();
   const receivablePool = nonWipItemsPool();
   const matches = (q ? receivablePool.filter(i=>i.name.toLowerCase().includes(q)) : receivablePool).slice(0,300);
@@ -9825,7 +9941,8 @@ function grRenderLines(){
         <input type="text" id="grItemInput${idx}" placeholder="Nama barang" value="${escapeHtml(line.itemName)}"
           oninput="grOnItemNameInput(${idx}, this.value)"
           onfocus="grRenderCombo(${idx}, this.value)"
-          onblur="setTimeout(()=>grCloseCombo(${idx}), 150)">
+          onblur="setTimeout(()=>grCloseCombo(${idx}), 150)"
+          onkeydown="comboKeyNav(event,'grCombo${idx}')">
         <div class="combo-list" id="grCombo${idx}"></div>
       </div>
       <input type="number" placeholder="Qty" value="${line.qty}" oninput="grUpdateLine(${idx},'qty',this.value)">
@@ -9857,6 +9974,49 @@ function grUpdateTotal(){
   if(el) el.innerHTML = 'Total: <b>' + fmtIDR(total) + '</b>';
 }
 function itemByNameLookup(name){ return state.items.find(i=>i.name.toLowerCase()===name.trim().toLowerCase()); }
+/* Generic keyboard navigation for every search/combo-box dropdown app-wide
+   (barang, supplier, dll). ArrowDown/ArrowUp moves a highlighted selection
+   through the currently rendered .combo-item rows of the dropdown named by
+   boxId, Enter picks the highlighted row by replaying its own onmousedown
+   (so each combo's existing pick function runs untouched -- this helper
+   never needs to know which pick function a given dropdown uses), and Escape
+   closes the list and blurs the input. One shared _comboNavIdx is enough
+   because only one combo can be focused at a time. Each combo's own render
+   function resets _comboNavIdx to -1 so a stale highlight never survives a
+   re-filtered list. Wire with onkeydown="comboKeyNav(event,'<listBoxId>')"
+   on the text input, alongside its existing oninput/onfocus/onblur. */
+let _comboNavIdx = -1;
+function comboKeyNav(ev, boxId){
+  const box = document.getElementById(boxId);
+  if(ev.key==='Escape'){
+    if(box){ box.style.display='none'; box.innerHTML=''; }
+    _comboNavIdx = -1;
+    if(ev.target && ev.target.blur) ev.target.blur();
+    return;
+  }
+  if(!box || box.style.display==='none') return;
+  const items = Array.from(box.querySelectorAll('.combo-item'));
+  if(!items.length) return;
+  if(ev.key==='ArrowDown'){
+    ev.preventDefault();
+    _comboNavIdx = (_comboNavIdx+1) % items.length;
+    comboHighlight(items);
+  }else if(ev.key==='ArrowUp'){
+    ev.preventDefault();
+    _comboNavIdx = (_comboNavIdx-1+items.length) % items.length;
+    comboHighlight(items);
+  }else if(ev.key==='Enter'){
+    if(_comboNavIdx>=0 && items[_comboNavIdx]){
+      ev.preventDefault();
+      items[_comboNavIdx].dispatchEvent(new MouseEvent('mousedown', {bubbles:true, cancelable:true}));
+    }
+  }
+}
+function comboHighlight(items){
+  items.forEach((el,i)=>el.classList.toggle('active', i===_comboNavIdx));
+  const active = items[_comboNavIdx];
+  if(active && active.scrollIntoView) active.scrollIntoView({block:'nearest'});
+}
 /* Supplier combo: typing is allowed to filter, but the value that actually
    gets submitted (#grSupplier, hidden) is only ever set by picking a row from
    the dropdown -- so a free-typed name that doesn't match an existing
@@ -9866,6 +10026,7 @@ function itemByNameLookup(name){ return state.items.find(i=>i.name.toLowerCase()
 function grRenderSupplierCombo(query){
   const box = document.getElementById('grSupplierCombo');
   if(!box) return;
+  _comboNavIdx = -1;
   const q = (query||'').trim().toLowerCase();
   const list = state.suppliers || [];
   const matches = (q ? list.filter(s=>(s.name||'').toLowerCase().includes(q)) : list).slice(0,300);
@@ -9969,7 +10130,7 @@ function openTransferModal(){
     <div class="field">
       <label>Barang</label>
       <div class="combo-wrap">
-        <input type="text" id="tfItemInput" placeholder="Ketik untuk mencari barang…" oninput="tfOnItemInput(this.value)" onfocus="tfRenderCombo(this.value)" onblur="setTimeout(()=>tfCloseCombo(), 150)">
+        <input type="text" id="tfItemInput" placeholder="Ketik untuk mencari barang…" oninput="tfOnItemInput(this.value)" onfocus="tfRenderCombo(this.value)" onblur="setTimeout(()=>tfCloseCombo(), 150)" onkeydown="comboKeyNav(event,'tfCombo')">
         <input type="hidden" id="tfItem">
         <div class="combo-list" id="tfCombo"></div>
       </div>
@@ -9990,6 +10151,7 @@ function tfOnItemInput(value){
 function tfRenderCombo(query){
   const box = document.getElementById('tfCombo');
   if(!box) return;
+  _comboNavIdx = -1;
   const q = (query||'').trim().toLowerCase();
   const matches = (q ? state.items.filter(i=>i.name.toLowerCase().includes(q)) : state.items).slice(0,300);
   if(matches.length===0){ box.style.display='none'; box.innerHTML=''; return; }
@@ -10148,7 +10310,8 @@ function srRenderLines(){
         <input type="text" id="srItemInput${idx}" placeholder="Ketik untuk mencari barang…" value="${selected?escapeHtml(selected.name):''}"
           oninput="srOnItemInput(${idx}, this.value)"
           onfocus="srRenderCombo(${idx}, this.value)"
-          onblur="setTimeout(()=>srCloseCombo(${idx}), 150)">
+          onblur="setTimeout(()=>srCloseCombo(${idx}), 150)"
+          onkeydown="comboKeyNav(event,'srCombo${idx}')">
         <div class="combo-list" id="srCombo${idx}"></div>
       </div>
       <input type="number" placeholder="Jumlah" value="${line.qty}" oninput="srUpdateLine(${idx},'qty',this.value)">
@@ -10170,6 +10333,7 @@ function srOnItemInput(idx, value){
 function srRenderCombo(idx, query){
   const box = document.getElementById('srCombo'+idx);
   if(!box) return;
+  _comboNavIdx = -1;
   const q = (query||'').trim().toLowerCase();
   // Permintaan Barang moves real stock out of Gudang Utama -- WIP items
   // have none, so they're excluded here entirely (both WIP Kitchen and WIP
@@ -10347,9 +10511,11 @@ function wipReqAllowedDivisions(){
   return {allowedDivisions, lockedDivision};
 }
 /* --- Permintaan WIP: save-as-draft (see the generic drafts module above
-   grAutoSaveDraft for the shared storage/list mechanics). WIP requests
-   are never edited after creation (only approved/rejected/deleted), so
-   openWipRequestModal is always the "new document" form. */
+   grAutoSaveDraft for the shared storage/list mechanics). openWipRequestModal
+   is always the "new document" form; editing an existing pending request
+   goes through openEditWipModal/submitEditWip/actionEditWipRequestDoc
+   instead (below, near confirmDeleteWip), which reuses wipReqLines/
+   wipReqRenderLines the same way the create form does. */
 let _wipReqDraftId = null;
 function wipReqHasMeaningfulDraftContent(){
   const noteTyped = (document.getElementById('wipReqNote')||{}).value || '';
@@ -10445,7 +10611,8 @@ function wipReqRenderLines(){
         <input type="text" id="wipReqItemInput${idx}" placeholder="Ketik untuk mencari barang WIP…" value="${selected?escapeHtml(selected.name):''}"
           oninput="wipReqOnItemInput(${idx}, this.value)"
           onfocus="wipReqRenderCombo(${idx}, this.value)"
-          onblur="setTimeout(()=>wipReqCloseCombo(${idx}), 150)">
+          onblur="setTimeout(()=>wipReqCloseCombo(${idx}), 150)"
+          onkeydown="comboKeyNav(event,'wipReqCombo${idx}')">
         <div class="combo-list" id="wipReqCombo${idx}"></div>
       </div>
       <input type="number" placeholder="Jumlah" value="${line.qty}" oninput="wipReqUpdateLine(${idx},'qty',this.value)">
@@ -10468,6 +10635,7 @@ function wipReqOnItemInput(idx, value){
 function wipReqRenderCombo(idx, query){
   const box = document.getElementById('wipReqCombo'+idx);
   if(!box) return;
+  _comboNavIdx = -1;
   const q = (query||'').trim().toLowerCase();
   const pool = wipReqItems();
   const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
@@ -10605,6 +10773,100 @@ async function actionDecideWipRequestDoc(docNumber, decision, note){
   }catch(err){
     toast(err.message || 'Gagal memproses permintaan. Coba lagi.', true);
   }
+}
+/* Edit mirrors openEditSrModal/submitEditSr/actionEditStoreRequestDoc for SR
+   exactly. WIP never has partial approval -- a whole document's lines always
+   share one status -- so unlike SR's edit (which must separately filter out
+   already-'disetujui' lines) every line here is simply the full doc, as long
+   as its status is still 'menunggu'. A Kitchen Leader editing gets the same
+   "Catatan Revisi" field SR gives them, instead of overwriting the original
+   requester's own Catatan, for the same reason: so Receiving can tell a
+   leader's revision apart from the requester's original note. */
+function openEditWipModal(docNumber){
+  const allLines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(allLines.length===0) return;
+  const first = allLines[0];
+  const role = currentRole();
+  if(first.status!=='menunggu'){ toast('Permintaan ini sudah diproses, tidak bisa diubah lagi.', true); return; }
+  if(!canEditWip(role, first)){ toast('Anda tidak dapat mengubah permintaan ini.', true); return; }
+  wipReqLines = allLines.map(l=>({
+    itemId: l.itemId,
+    qty: l.requestedUnit ? l.requestedQty : l.qty,
+    unit: l.requestedUnit ? 'small' : 'uom',
+    _txId: l.id,
+  }));
+  const isLeaderEdit = role.kind==='kitchen_leader';
+  const noteFieldHtml = isLeaderEdit
+    ? `${first.note ? `<div class="field"><label>Catatan dari ${escapeHtml(first.divisionName||'')}</label><div class="cell-sub" style="background:var(--surface-2); padding:8px 10px; border-radius:6px;">${escapeHtml(first.note)}</div></div>` : ''}
+       <div class="field"><label>Catatan Revisi (Kitchen Leader)</label><textarea id="wipReqLeaderNote" placeholder="Kenapa jumlah/barang direvisi">${escapeHtml(first.leaderNote||'')}</textarea></div>`
+    : `<div class="field"><label>Catatan</label><textarea id="wipReqNote" placeholder="Untuk keperluan apa">${escapeHtml(first.note||'')}</textarea></div>`;
+  const body = `
+    <div id="wipReqError"></div>
+    <div class="lock-note">Mengubah Permintaan WIP <b>${docNumber}</b> untuk <b>${escapeHtml(first.divisionName||'')}</b>.</div>
+    <div class="field"><label>Barang WIP</label><div id="wipReqLinesBox"></div>
+      <button type="button" class="mini-link-btn" style="margin-top:2px;" onclick="wipReqAddLine()">+ Tambah Barang</button>
+    </div>
+    ${noteFieldHtml}
+  `;
+  const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button><button class="btn btn-primary" onclick="submitEditWip('${docNumber}', ${isLeaderEdit})">Simpan Perubahan</button>`;
+  openModal('Edit Permintaan WIP ' + docNumber, body, foot);
+  wipReqRenderLines();
+}
+async function submitEditWip(docNumber, isLeaderEdit){
+  const noteFields = isLeaderEdit
+    ? { leaderNote: document.getElementById('wipReqLeaderNote').value.trim(), leaderNoteBy: currentUserName || null }
+    : { note: document.getElementById('wipReqNote').value.trim() };
+  const err = document.getElementById('wipReqError');
+  const validLines = wipReqLines.filter(l=>l.itemId && parseFloat(l.qty)>0);
+  if(validLines.length===0){ err.innerHTML = errBox('Pilih minimal 1 barang WIP dengan jumlah lebih dari 0.'); return; }
+  const lines = validLines.map(l=>{
+    const item = itemById(l.itemId);
+    const enteredQty = parseFloat(l.qty);
+    const useSmall = l.unit==='small' && srHasSmallUnit(item);
+    return {
+      itemId: l.itemId,
+      qty: useSmall ? (enteredQty / item.conversionQty) : enteredQty,
+      requestedQty: useSmall ? enteredQty : null,
+      requestedUnit: useSmall ? item.smallUnit : null,
+      _txId: l._txId || null,
+    };
+  });
+  await submitGuarded(err, async ()=>{ await actionEditWipRequestDoc(docNumber, lines, noteFields); });
+}
+async function actionEditWipRequestDoc(docNumber, lines, noteFields){
+  const allLines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
+  if(allLines.length===0) throw new Error('Permintaan WIP tidak ditemukan.');
+  const first = allLines[0];
+  if(first.status!=='menunggu') throw new Error('Permintaan ini sudah diproses, tidak bisa diubah lagi.');
+  if(lines.length===0) throw new Error('Pilih minimal 1 barang WIP dengan jumlah lebih dari 0.');
+  const existingIds = new Set(allLines.map(l=>l.id));
+  const keepIds = new Set();
+  for(const line of lines){
+    const item = itemById(line.itemId);
+    if(line._txId && existingIds.has(line._txId)){
+      keepIds.add(line._txId);
+      await db.doc('transactions/'+line._txId).update({
+        itemId: item.id, itemName: item.name, uom: item.uom,
+        qty: line.qty, requestedQty: line.requestedQty || null, requestedUnit: line.requestedUnit || null,
+        ...('note' in noteFields ? {note: noteFields.note||''} : {}),
+        ...('leaderNote' in noteFields ? {leaderNote: noteFields.leaderNote||'', leaderNoteBy: noteFields.leaderNoteBy||null, leaderNoteAt: new Date().toISOString()} : {}),
+      });
+    } else if(!line._txId){
+      await logTx({
+        type:'wiprequest', status:'menunggu', docNumber,
+        itemId:item.id, itemName:item.name, uom:item.uom, qty:line.qty,
+        requestedQty: line.requestedQty || null, requestedUnit: line.requestedUnit || null,
+        divisionId: first.divisionId, divisionName: first.divisionName,
+        note: noteFields.note || '',
+        leaderNote: noteFields.leaderNote || '', leaderNoteBy: noteFields.leaderNoteBy || null, leaderNoteAt: noteFields.leaderNote ? new Date().toISOString() : null,
+        kitchenGateStatus: first.kitchenGateStatus || null,
+      });
+    }
+  }
+  for(const line of allLines){
+    if(!keepIds.has(line.id)) await db.doc('transactions/'+line.id).delete();
+  }
+  toast('Permintaan WIP ' + docNumber + ' berhasil diubah.');
 }
 function confirmDeleteWip(docNumber){
   const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
