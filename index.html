@@ -1138,40 +1138,32 @@ function canDeleteSR(role, sr){
 }
 function canReceive(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canEditMaster(role){ return role.kind==='master' || role.kind==='receiving'; }
-/* True when isoString falls on today's calendar date in Asia/Jakarta, OR
-   the calendar date right before it -- i.e. a 2-day window (the day it
-   happened, plus one more), not just today. Comparing formatted date
-   strings turned into UTC midnight timestamps sidesteps DST/local-tz
-   weirdness; diffDays is however many Jakarta calendar days ago isoString
-   was (0 = today, 1 = yesterday). */
-function isWithinJakartaEditWindow(isoString){
+/* True when isoString falls on today's calendar date in Asia/Jakarta,
+   regardless of what timezone the browser itself is running in. */
+function isSameJakartaDay(isoString){
   if(!isoString) return false;
   const fmt = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Jakarta', year:'numeric', month:'2-digit', day:'2-digit'});
-  const d = new Date(fmt.format(new Date(isoString)) + 'T00:00:00Z');
-  const today = new Date(fmt.format(new Date()) + 'T00:00:00Z');
-  const diffDays = Math.round((today - d) / 86400000);
-  return diffDays >= 0 && diffDays <= 1;
+  return fmt.format(new Date(isoString)) === fmt.format(new Date());
 }
 /* Editing AND deleting a receipt share canEditMaster's reach (Master/
    Receiving), same as before -- but Receiving's reach here is additionally
-   capped to a 2-day window (Asia/Jakarta: the day the receipt was created,
-   plus the day after). This is a deliberate guard against backdated
-   changes: once a price-only edit stopped being blocked by stock
-   availability (see actionEditReceivingDoc), Receiving could otherwise
-   freely rewrite a GR from months ago. Master keeps the standing,
-   unrestricted ability to fix anything after the fact -- same asymmetry as
-   Edit Stok and Koreksi Opname Terkunci elsewhere in the app -- so
-   Receiving's only path past this window is asking Master. doc is a GR
-   line (any line of the document; createdAt is the same across all of a
-   document's lines). */
+   capped to the SAME CALENDAR DAY (Asia/Jakarta) the receipt was created.
+   This is a deliberate guard against backdated changes: once a price-only
+   edit stopped being blocked by stock availability (see
+   actionEditReceivingDoc), Receiving could otherwise freely rewrite a GR
+   from months ago. Master keeps the standing, unrestricted ability to fix
+   anything after the fact -- same asymmetry as Edit Stok and Koreksi Opname
+   Terkunci elsewhere in the app -- so Receiving's only path past this window
+   is asking Master. doc is a GR line (any line of the document; createdAt is
+   the same across all of a document's lines). */
 function canEditReceivingDoc(role, doc){
   if(!doc) return false;
   if(role.kind==='master') return true;
-  if(role.kind==='receiving') return isWithinJakartaEditWindow(doc.createdAt);
+  if(role.kind==='receiving') return isSameJakartaDay(doc.createdAt);
   return false;
 }
 function receivingEditLockedNotice(){
-  toast('Penerimaan ini sudah lebih dari 1 hari sejak dibuat -- hubungi akun Master untuk mengubah atau menghapusnya.', true);
+  toast('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubah atau menghapusnya.', true);
 }
 /* Every role can view Dashboard except a plain division account -- Service
    Leader is the one division-kind exception (it also oversees several
@@ -1925,8 +1917,8 @@ async function actionEditReceivingDoc(docNumber, payload){
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
   const first = existingLines[0];
   // Defensive re-check (openReceivingModal already gated opening the form on
-  // this) -- 2-day window for Receiving, Master unrestricted.
-  if(!canEditReceivingDoc(currentRole(), first)) throw new Error('Penerimaan ini sudah lebih dari 1 hari sejak dibuat -- hubungi akun Master.');
+  // this) -- same-day-only for Receiving, Master unrestricted.
+  if(!canEditReceivingDoc(currentRole(), first)) throw new Error('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master.');
   const keepIds = new Set();
   // payload.lines is in the order shown/edited in the form -- write that
   // position back as each line's lineIndex (see actionReceivingDoc) so the
@@ -2005,7 +1997,7 @@ function confirmDeleteReceiving(docNumber){
   if(lines.length===0) return;
   const role = currentRole();
   if(!canEditReceivingDoc(role, lines[0])){
-    toast(canEditMaster(role) ? 'Penerimaan ini sudah lebih dari 1 hari sejak dibuat -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
     return;
   }
   openConfirm('Hapus Penerimaan', `Hapus Penerimaan ${docNumber}? Stok yang sudah masuk dari dokumen ini akan dikurangi kembali. Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteReceiving(docNumber), 'Hapus', true);
@@ -2015,7 +2007,7 @@ async function actionDeleteReceiving(docNumber){
   if(lines.length===0) return;
   const role = currentRole();
   if(!canEditReceivingDoc(role, lines[0])){
-    toast(canEditMaster(role) ? 'Penerimaan ini sudah lebih dari 1 hari sejak dibuat -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
     return;
   }
   try{
@@ -6533,8 +6525,8 @@ function renderReceiving(){
                         <span class="cell-sub" style="margin-left:8px;">${fmtDate(d.createdAt)} · ${escapeHtml(first.supplierName||'Tanpa Supplier')}${first.doNumber?' · DO '+escapeHtml(first.doNumber):''}</span>
                       </div>
                       ${canEditR ? `<div style="display:flex; gap:6px; flex-shrink:0;" onclick="event.stopPropagation()">
-                        <button class="icon-btn ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Edit':'Sudah lebih dari 1 hari -- hubungi Master'}" onclick="${docEditable?`openReceivingModal('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.edit:ICONS.lock}</button>
-                        <button class="icon-btn icon-btn-danger ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Hapus':'Sudah lebih dari 1 hari -- hubungi Master'}" onclick="${docEditable?`confirmDeleteReceiving('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.trash:ICONS.lock}</button>
+                        <button class="icon-btn ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Edit':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`openReceivingModal('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.edit:ICONS.lock}</button>
+                        <button class="icon-btn icon-btn-danger ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Hapus':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`confirmDeleteReceiving('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.trash:ICONS.lock}</button>
                       </div>` : ''}
                     </div>
                   </td>
@@ -9775,9 +9767,9 @@ function grConfirmDeleteDraft(draftId){
 }
 /* editDocNumber: when set, prefills the form from an existing 'in' document
    and routes submit to actionEditReceivingDoc instead of creating a new one.
-   Editing/deleting a receipt is gated by canEditReceivingDoc (Master
-   anytime, Receiving within a 2-day window -- see its own comment) -- a
-   late PDF attachment stays canEditMaster's plain, unrestricted reach,
+   Editing/deleting a receipt is gated by canEditReceivingDoc (Master anytime,
+   Receiving same-day-only -- see its own comment) -- a late PDF attachment
+   stays canEditMaster's plain, unrestricted reach,
    since attaching a scanned invoice days later never changes any recorded
    qty/price/stock. draftId: when set (and not editing), resumes that
    specific saved draft -- passed by clicking an entry in the draft list
@@ -9792,7 +9784,7 @@ function openReceivingModal(editDocNumber, draftId){
     if(existingLines.length===0) return;
     first = existingLines[0];
     if(!canEditReceivingDoc(role, first)){
-      toast(canEditMaster(role) ? 'Penerimaan ini sudah lebih dari 1 hari sejak dibuat -- hubungi akun Master untuk mengubahnya.' : 'Anda tidak dapat mengubah penerimaan ini.', true);
+      toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubahnya.' : 'Anda tidak dapat mengubah penerimaan ini.', true);
       return;
     }
     receivingLines = existingLines.map(l=>({
