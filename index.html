@@ -6213,18 +6213,24 @@ function openReceivingDetail(docNumber){
   const lines = sortLinesByIndex(state.receivingTransactions.filter(t=>t.type==='in' && t.docNumber===docNumber));
   if(lines.length===0) return;
   const first = lines[0];
-  const total = lines.reduce((s,l)=>s+(l.totalValue||0),0);
+  const subtotal = lines.reduce((s,l)=>s+(l.totalValue||0),0);
+  const ppn = first.ppn || 0;
+  const shippingCost = first.shippingCost || 0;
+  // PPN and Harga Pengiriman are kept out of each line's totalValue on
+  // purpose -- per-item stock cost/valuation (used everywhere else: Laporan
+  // Barang Masuk's Total Nilai, Inventory, COGS reports) is qty*price only,
+  // not a landed cost including tax/freight. The grand total shown here is
+  // purely a display-only reconciliation against the supplier's invoice, so
+  // it's fine for it to include them even though no stored value does.
+  const grandTotal = subtotal + ppn + shippingCost;
+  const hasExtra = ppn>0 || shippingCost>0;
   const anyPeruntukan = lines.some(l=>isStorageWarehouse(l.toWarehouseId));
   const canEdit = canEditMaster(currentRole());
   const body = `
     <div id="grAttachError"></div>
     <div class="lock-note">${first.supplierName?`Supplier <b>${escapeHtml(first.supplierName)}</b> · `:''}${fmtDate(first.createdAt)}</div>
-    ${first.doNumber || first.ppn || first.shippingCost ? `
-      <div class="two-col" style="margin-bottom:14px;">
-        ${first.doNumber ? `<div class="field" style="margin:0;"><label>No. Surat Jalan / DO</label><div class="cell-title">${escapeHtml(first.doNumber)}</div></div>` : ''}
-        ${first.ppn ? `<div class="field" style="margin:0;"><label>PPN</label><div class="cell-title">${fmtIDR(first.ppn)} <span class="cell-sub">(catatan, tidak termasuk Total)</span></div></div>` : ''}
-        ${first.shippingCost ? `<div class="field" style="margin:0;"><label>Harga Pengiriman</label><div class="cell-title">${fmtIDR(first.shippingCost)} <span class="cell-sub">(catatan, tidak termasuk Total)</span></div></div>` : ''}
-      </div>
+    ${first.doNumber ? `
+      <div class="field" style="margin-bottom:14px;"><label>No. Surat Jalan / DO</label><div class="cell-title">${escapeHtml(first.doNumber)}</div></div>
     ` : ''}
     <div class="field" style="margin-bottom:14px;">
       <label>Lampiran PDF</label>
@@ -6238,7 +6244,14 @@ function openReceivingDetail(docNumber){
       <table><thead><tr><th>Barang</th><th>Lokasi</th><th class="num">Jumlah</th><th class="num">Harga</th><th class="num">Total</th>${anyPeruntukan?'<th>Peruntukan</th>':''}</tr></thead>
       <tbody>${lines.map(l=>`<tr><td>${escapeHtml(l.itemName)}</td><td>${escapeHtml(l.toWarehouseName)}</td><td class="num">${qtyWithSmallNote(l.qty, itemById(l.itemId), l.uom)}</td><td class="num">${l.price?fmtIDR(l.price):'—'}</td><td class="num">${fmtIDR(l.totalValue||0)}</td>${anyPeruntukan?`<td>${isStorageWarehouse(l.toWarehouseId)?peruntukanName(l.peruntukan):'—'}</td>`:''}</tr>`).join('')}</tbody></table>
     </div>
-    <div style="margin-top:12px; text-align:right; font-size:13px;">Total: <b>${fmtIDR(total)}</b></div>
+    <div style="margin-top:12px; text-align:right; font-size:13px;">
+      ${hasExtra ? `
+        <div class="cell-sub" style="margin-bottom:2px;">Subtotal Barang: ${fmtIDR(subtotal)}</div>
+        ${ppn>0 ? `<div class="cell-sub" style="margin-bottom:2px;">PPN: ${fmtIDR(ppn)}</div>` : ''}
+        ${shippingCost>0 ? `<div class="cell-sub" style="margin-bottom:2px;">Ongkos Kirim: ${fmtIDR(shippingCost)}</div>` : ''}
+        <div style="margin-top:6px; padding-top:6px; border-top:1px solid var(--border);">Total: <b>${fmtIDR(grandTotal)}</b></div>
+      ` : `<div>Total: <b>${fmtIDR(grandTotal)}</b></div>`}
+    </div>
     ${first.note ? `<div class="cell-sub" style="margin-top:6px;">Catatan: ${escapeHtml(first.note)}</div>` : ''}
   `;
   openModal('Penerimaan ' + docNumber, body, `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`, true);
@@ -6790,8 +6803,44 @@ async function submitOpname(warehouseId){
   render();
 }
 
+/* renderDrawer()'s "Aktivitas Terbaru" used to read straight out of
+   state.transactions -- a single listener shared by the WHOLE app that only
+   ever keeps the 500 most recent transactions of every item, every
+   location, every type combined (see its own onSnapshot comment). On a busy
+   day that window can roll over in hours, silently dropping an older
+   transaction for THIS item even though it's still sitting in the database
+   and still correctly reflected in the item's live stock total -- making it
+   look like stock appeared from nowhere. _drawerHistoryItemId/Rows cache a
+   dedicated, item-scoped fetch (queried fresh each time the drawer opens)
+   so this one item's history stays complete regardless of how much
+   unrelated activity has pushed it out of the shared cache. */
+let _drawerHistoryItemId = null;
+let _drawerHistoryRows = null;
+let _drawerHistoryLoading = false;
+async function loadDrawerFullHistory(itemId){
+  _drawerHistoryLoading = true;
+  try{
+    const snap = await db.collection('transactions').where('itemId','==',itemId).orderBy('createdAt','desc').limit(100).get();
+    const rows = snap.docs.map(d=>({id:d.id, ...d.data()})).filter(t=>['in','transfer','opname','adjustment'].includes(t.type));
+    if(_drawerHistoryItemId !== itemId) return; // drawer moved on to another item meanwhile
+    _drawerHistoryRows = rows;
+  }catch(e){
+    if(_drawerHistoryItemId !== itemId) return;
+    _drawerHistoryRows = []; // fall back to the capped cache below rather than blocking the drawer
+  }finally{
+    if(_drawerHistoryItemId === itemId){
+      _drawerHistoryLoading = false;
+      if(state.drawerItemId === itemId) renderDrawer();
+    }
+  }
+}
 function openItemDrawer(itemId){
   state.drawerItemId = itemId;
+  if(_drawerHistoryItemId !== itemId){
+    _drawerHistoryItemId = itemId;
+    _drawerHistoryRows = null;
+    loadDrawerFullHistory(itemId);
+  }
   renderDrawer();
   document.getElementById('drawerBackdrop').classList.add('open');
   document.getElementById('drawerBox').classList.add('open');
@@ -6833,7 +6882,24 @@ function renderDrawer(){
   const isMasterRole = currentRole().kind === 'master';
   const locs = whsInScope.map(w=>({w, qty: stockQty(w.id, item.id)})).filter(x=>x.qty>0).sort((a,b)=>b.qty-a.qty);
   const priceHistory = getPriceHistory(item.id).slice(0,6);
-  const moves = state.transactions.filter(t=>t.itemId===item.id && ['in','transfer','opname','adjustment'].includes(t.type) && (!scope || scope.includes(t.toWarehouseId) || scope.includes(t.fromWarehouseId))).slice(0,10);
+  // Prefer the item-scoped fetch from loadDrawerFullHistory (complete, not
+  // capped by the rest of the app's activity) -- fall back to the shared
+  // capped cache for the instant the drawer opens, before that fetch has
+  // resolved. Once resolved, merge in anything the live capped cache has for
+  // this item that the one-time fetch predates (by id, since the fetch is a
+  // single .get() snapshot, not a live listener) so a transaction logged
+  // while the drawer is sitting open still shows up immediately.
+  const liveForItem = state.transactions.filter(t=>t.itemId===item.id && ['in','transfer','opname','adjustment'].includes(t.type));
+  let historySource;
+  if(_drawerHistoryItemId===item.id && _drawerHistoryRows){
+    const seen = new Set(_drawerHistoryRows.map(t=>t.id));
+    const extra = liveForItem.filter(t=>!seen.has(t.id));
+    historySource = extra.length ? [...extra, ..._drawerHistoryRows].sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt)) : _drawerHistoryRows;
+  } else {
+    historySource = liveForItem;
+  }
+  const moves = historySource.filter(t=>!scope || scope.includes(t.toWarehouseId) || scope.includes(t.fromWarehouseId)).slice(0,10);
+  const movesLoading = _drawerHistoryItemId===item.id && _drawerHistoryLoading && !_drawerHistoryRows;
 
   box.innerHTML = `
     <div class="drawer-head">
@@ -6910,7 +6976,7 @@ function renderDrawer(){
         </div>`;
       }).join('')}
 
-      <div class="drawer-section-label">Aktivitas Terbaru</div>
+      <div class="drawer-section-label">Aktivitas Terbaru${movesLoading ? ' <span class="cell-sub" style="font-weight:400; text-transform:none; letter-spacing:0;">(memuat riwayat lengkap…)</span>' : ''}</div>
       ${moves.length===0 ? `<div class="cell-sub">Belum ada aktivitas.</div>` : moves.map(t=>{
         const isIn = t.type==='in';
         const isOpname = t.type==='opname';
