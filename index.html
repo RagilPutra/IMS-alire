@@ -1263,6 +1263,15 @@ function canEditWip(role, w){
 }
 function isWipGatePending(w){ return !!w && w.status==='menunggu' && w.kitchenGateStatus==='pending'; }
 function wipStatusTag(w){ if(isWipGatePending(w)) return '<span class="tag tag-kitchen-gate">Menunggu Kitchen Leader</span>'; return statusTag(w.status); }
+// A WIP request doc's lines are approved one at a time (no atomic batch
+// write), so a doc can briefly sit with SOME lines 'disetujui' and others
+// still 'menunggu'. Using lines[0] alone for the doc's tab/status/actions
+// could then pick an already-decided line even though the doc still has a
+// line genuinely waiting -- making it vanish from the Menunggu tab while
+// pendingWipCount() (which checks every line) still counted it, showing a
+// badge count with nothing underneath it. Prefer a still-pending line as
+// the doc's "representative" line wherever one exists.
+function wipRepresentativeLine(lines){ return lines.find(l=>l.status==='menunggu') || lines[0]; }
 function pendingWipCount(){
   const role = currentRole();
   const docs = new Set(state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.status==='menunggu' && canSeeSRForDivision(role, t.divisionId)).map(t=>t.docNumber));
@@ -1495,9 +1504,28 @@ function revealAppAfterLoading(){
 // not yet saved -- "ketik 1 langsung balik ke 0". These 4 report tabs only
 // ever show finalized/locked periods, so they don't need live reactivity
 // while open either.
+// Generalized beyond just opname: ANY background Firestore update landing
+// while the user has a form control focused -- typing in a field, or with a
+// native <input type="date"> picker open -- would tear down and rebuild the
+// whole view, wiping an in-progress keystroke or silently closing the date
+// picker out from under them. So this suspends the render while a form
+// control is focused and replays it once on the next focusout (see the
+// listener below), instead of only special-casing the 3 opname views.
+let _pendingBackgroundRender = false;
 function renderUnlessOpnameTyping(){
-  if(state.view !== 'opname-count' && state.view !== 'opname-correct' && state.view !== 'report-opname') render();
+  if(state.view === 'opname-count' || state.view === 'opname-correct' || state.view === 'report-opname') return;
+  const active = document.activeElement;
+  const isFormControl = active && ['INPUT','TEXTAREA','SELECT'].includes(active.tagName);
+  if(isFormControl){ _pendingBackgroundRender = true; return; }
+  render();
 }
+document.addEventListener('focusout', function(){
+  if(!_pendingBackgroundRender) return;
+  _pendingBackgroundRender = false;
+  // Defer a tick so the control's own blur/change (e.g. a date picker
+  // committing its value) finishes first, before the deferred render runs.
+  setTimeout(()=>{ render(); }, 0);
+}, true);
 /* Connects to the DB and starts listening to 'users' immediately at page
    load -- before login -- so accounts Master added or repasswordded from
    Setting can log in right away, not only after some other account has
@@ -6157,7 +6185,7 @@ function renderWipRequests(){
   const role = currentRole();
   const all = groupByDocNumber(state.wipRequestTransactions.filter(t=>t.type==='wiprequest')).filter(d=>canSeeSRForDivision(role, d.lines[0].divisionId));
   const tabs = [{id:'menunggu', label:'Menunggu'},{id:'disetujui', label:'Disetujui'},{id:'ditolak', label:'Ditolak'},{id:'all', label:'Semua'}];
-  let docs = state.wipTab==='all' ? all : all.filter(d=>d.lines[0].status===state.wipTab);
+  let docs = state.wipTab==='all' ? all : all.filter(d=>wipRepresentativeLine(d.lines).status===state.wipTab);
   if(state.wipSearch){
     const q = state.wipSearch.toLowerCase();
     docs = docs.filter(d => d.docNumber.toLowerCase().includes(q) || d.lines.some(l=>(l.itemName||'').toLowerCase().includes(q)) || (d.lines[0].divisionName||'').toLowerCase().includes(q) || (d.lines[0].createdBy||'').toLowerCase().includes(q));
@@ -6189,7 +6217,7 @@ function renderWipRequests(){
           <tbody>
             ${pageDocs.length===0 ? `<tr class="empty-row"><td colspan="6">Tidak ada Permintaan WIP yang cocok.</td></tr>` :
               pageDocs.map(d=>{
-                const first = d.lines[0];
+                const first = wipRepresentativeLine(d.lines);
                 return `<tr class="clickable" onclick="openWipDetail('${d.docNumber}')">
                   <td class="code-mono">${d.docNumber}</td>
                   <td>${fmtDate(d.createdAt)}</td>
@@ -6837,6 +6865,7 @@ async function submitOpname(warehouseId){
 let _drawerHistoryItemId = null;
 let _drawerHistoryRows = null;
 let _drawerHistoryLoading = false;
+let _lastDrawerItemId = null; // keys the scroll-position preservation in renderDrawer()
 async function loadDrawerFullHistory(itemId){
   _drawerHistoryLoading = true;
   try{
@@ -6869,6 +6898,7 @@ function closeDrawer(){
   document.getElementById('drawerBackdrop').classList.remove('open');
   document.getElementById('drawerBox').classList.remove('open');
   state.drawerItemId = null;
+  _lastDrawerItemId = null; // so reopening the same item later starts scrolled to top, not restored
 }
 function getPriceHistory(itemId){
   const receipts = state.receivingTransactions.filter(t=>t.type==='in' && t.itemId===itemId && t.price>0).slice().sort((a,b)=> new Date(a.createdAt) - new Date(b.createdAt));
@@ -6886,6 +6916,13 @@ function renderDrawer(){
   const item = itemById(state.drawerItemId);
   const box = document.getElementById('drawerBox');
   if(!item){ box.innerHTML = ''; return; }
+  // Preserve the drawer's own internal scroll position (.drawer-body) across
+  // a same-item re-render triggered by a background Firestore update --
+  // otherwise a change arriving while the drawer is open and scrolled down
+  // (e.g. reading Aktivitas Terbaru further down) snaps it back to the top.
+  const prevBody = box.querySelector('.drawer-body');
+  const preserveDrawerScroll = prevBody && _lastDrawerItemId === state.drawerItemId;
+  const savedDrawerScrollTop = preserveDrawerScroll ? prevBody.scrollTop : 0;
   // A scoped role (a division, or Kitchen Leader) must only ever see stock,
   // locations and movement for the warehouse(s) it's allowed into here too --
   // not just on the Inventory list, since this drawer opens from that list.
@@ -7020,6 +7057,11 @@ function renderDrawer(){
       }).join('')}
     </div>
   `;
+  _lastDrawerItemId = state.drawerItemId;
+  if(preserveDrawerScroll){
+    const newBody = box.querySelector('.drawer-body');
+    if(newBody) newBody.scrollTop = savedDrawerScrollTop;
+  }
 }
 
 
@@ -9502,9 +9544,101 @@ function renderSetting(){
       </div>
     </div>
     ${userMgmtHtml}
+    ${isMaster ? `
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><h3>Backup Database</h3></div>
+      <div class="panel-body" style="padding:14px 16px;">
+        <div class="lock-note" style="margin-bottom:12px;">Mengunduh seluruh data sistem (barang, stok, semua transaksi, supplier, histori stok opname, akun) sebagai file .json. Tidak termasuk lampiran PDF Penerimaan Barang (hanya data tabelnya).</div>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          <button class="btn btn-primary" id="btnExportBackup" onclick="exportDatabaseBackup()">${ICONS.download||''} Download Database (Backup)</button>
+          <button class="btn btn-outline" id="btnExportSeed" onclick="exportDatabaseBackup(true)">${ICONS.download||''} Download untuk Project Baru (seed-data.json)</button>
+        </div>
+        <div class="lock-note" style="margin-top:10px;">Tombol kedua langsung menghasilkan file <b>seed-data.json</b> — file inilah yang ditimpakan ke <code>migrate/seed-data.json</code> di project Railway baru, lalu jalankan <code>npm run migrate</code> di sana untuk mengisi database project baru tersebut.</div>
+      </div>
+    </div>` : ''}
   `;
 }
 function confirmLogout(){ openConfirm('Keluar', 'Keluar dari akun ini?', logout, 'Keluar', false); }
+// One-time, uncapped fetch of every collection the app uses -- unlike the
+// app's own in-memory state (several of which are intentionally capped,
+// e.g. state.transactions at 500 rows, to keep the UI light), this reads
+// everything, so the resulting file is a genuine full backup, not a
+// partial "recent activity" snapshot. Works unchanged on both the Claude
+// Artifact (real Firestore) and the Railway deploy (its Firestore-lite
+// shim over Postgres) since both expose the same db.collection(x).get().
+const BACKUP_COLLECTIONS = ['users','items','stock','transactions','suppliers','opnameSessions','opnameDrafts','monthlyNetSales'];
+// forSeed=false (default): a human-readable full backup, one JSON file with
+// every collection's documents spread flat ({id, ...fields}) under a
+// metadata wrapper.
+// forSeed=true: the exact shape migrate/seed.js expects in
+// migrate/seed-data.json -- {collection: [{id, data:{...fields}}]} with no
+// wrapper -- so the download can be dropped straight into that path (same
+// filename) to seed a fresh Railway/Postgres project, with no manual
+// reshaping step in between.
+async function exportDatabaseBackup(forSeed){
+  if(currentRole().kind !== 'master'){ toast('Hanya akun Master yang bisa mengunduh backup database.', true); return; }
+  if(!db){ toast('Penyimpanan tidak tersedia di tampilan ini.', true); return; }
+  const btn = document.getElementById(forSeed ? 'btnExportSeed' : 'btnExportBackup');
+  const btnLabelDefault = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Mengunduh…'; }
+  showLoading('Mengambil seluruh data dari database…');
+  try{
+    let filename, content;
+    if(forSeed){
+      const seed = {};
+      for(const col of BACKUP_COLLECTIONS){
+        const snap = await db.collection(col).get();
+        seed[col] = snap.docs.map(d=>({ id: d.id, data: d.data() }));
+      }
+      filename = 'seed-data.json';
+      content = JSON.stringify(seed, null, 2);
+    } else {
+      const backup = { app: 'Alire Inventory', exportedAt: new Date().toISOString(), collections: {} };
+      for(const col of BACKUP_COLLECTIONS){
+        const snap = await db.collection(col).get();
+        backup.collections[col] = snap.docs.map(d=>({ id: d.id, ...d.data() }));
+      }
+      const stamp = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+      filename = 'alire-backup-' + stamp + '.json';
+      content = JSON.stringify(backup, null, 2);
+    }
+    const result = await downloadTextFile(filename, 'application/json', content);
+    if(result === 'saved') toast(forSeed ? 'seed-data.json berhasil diunduh — timpa file di migrate/seed-data.json pada project baru, lalu jalankan npm run migrate di sana.' : 'Backup database berhasil diunduh.');
+    // result === 'declined': viewer dismissed the save dialog -- they already know, nothing to toast.
+  }catch(e){
+    toast((e && e.message) || 'Gagal membuat backup. Coba lagi.', true);
+  }finally{
+    hideLoading();
+    if(btn){ btn.disabled = false; btn.innerHTML = btnLabelDefault; }
+  }
+}
+async function downloadTextFile(filename, mimeType, content){
+  // The Claude Artifact runs in a sandboxed frame that can't trigger a
+  // plain browser download -- it has to go through the platform's
+  // `downloads` capability (a confirmation dialog, viewer can decline).
+  // The Railway deploy is a normal top-level page with no such
+  // capability -- its Firestore-lite shim's claude.use() only knows
+  // 'db'/'assets'/'user' and returns null for anything else -- so it
+  // falls through to the ordinary Blob+<a download> trick below, which
+  // works fine there.
+  try{
+    const downloads = await claude.use('downloads');
+    if(downloads){
+      await downloads.save({ filename, data: content });
+      return 'saved';
+    }
+  }catch(e){
+    if(e && e.code === 'declined') return 'declined'; // viewer said no -- not an error
+    throw new Error((e && e.message) || 'Gagal menyimpan file.');
+  }
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  return 'saved';
+}
 
 /* ---------- Kelola User (Master only) ---------- */
 function openAddUserModal(){
@@ -11280,6 +11414,7 @@ const VIEW_PERM = {
 function defaultViewForRole(role){
   return canViewDashboard(role) ? 'dashboard' : 'storerequests';
 }
+let _lastRenderedView = null;
 function render(){
   const active = document.activeElement;
   const activeId = active && active.id;
@@ -11290,6 +11425,13 @@ function render(){
   const role = currentRole();
   const viewPerm = VIEW_PERM[state.view];
   if(viewPerm && !viewPerm(role)) state.view = defaultViewForRole(role);
+
+  // Preserve the page's scroll position across a same-view re-render (e.g. a
+  // background Firestore update arriving while the user has scrolled down a
+  // long list) -- actual navigation (goto()) already scrolls to top itself,
+  // so this only kicks in when staying on the same view as last render.
+  const preserveScroll = _lastRenderedView === state.view;
+  const savedScrollY = preserveScroll ? window.scrollY : 0;
 
   renderShell();
   const dispatch = {
@@ -11302,6 +11444,8 @@ function render(){
   };
   (dispatch[state.view] || dispatch[defaultViewForRole(role)])();
   if(state.drawerItemId) renderDrawer();
+  _lastRenderedView = state.view;
+  if(preserveScroll) window.scrollTo(0, savedScrollY);
 
   if(activeId){
     const el = document.getElementById(activeId);
