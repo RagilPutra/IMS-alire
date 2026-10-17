@@ -1138,16 +1138,22 @@ function canDeleteSR(role, sr){
 }
 function canReceive(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canEditMaster(role){ return role.kind==='master' || role.kind==='receiving'; }
-/* True when isoString falls on today's calendar date in Asia/Jakarta,
-   regardless of what timezone the browser itself is running in. */
-function isSameJakartaDay(isoString){
+/* True when isoString is within the last RECEIVING_EDIT_WINDOW_DAYS calendar
+   days of today in Asia/Jakarta (today counts as day 0), regardless of what
+   timezone the browser itself is running in. Compared by calendar date, not
+   by 24h-multiples, so "1 minggu" doesn't shift depending on what time of day
+   the receipt was entered. */
+const RECEIVING_EDIT_WINDOW_DAYS = 7;
+function isWithinReceivingEditWindow(isoString){
   if(!isoString) return false;
   const fmt = new Intl.DateTimeFormat('en-CA', {timeZone:'Asia/Jakarta', year:'numeric', month:'2-digit', day:'2-digit'});
-  return fmt.format(new Date(isoString)) === fmt.format(new Date());
+  const toDayNum = d => { const [y,m,dd] = fmt.format(d).split('-').map(Number); return Date.UTC(y, m-1, dd) / 86400000; };
+  const diffDays = toDayNum(new Date()) - toDayNum(new Date(isoString));
+  return diffDays >= 0 && diffDays <= RECEIVING_EDIT_WINDOW_DAYS;
 }
 /* Editing AND deleting a receipt share canEditMaster's reach (Master/
    Receiving), same as before -- but Receiving's reach here is additionally
-   capped to the SAME CALENDAR DAY (Asia/Jakarta) the receipt was created.
+   capped to RECEIVING_EDIT_WINDOW_DAYS (1 week) from the day (Asia/Jakarta) the receipt was created.
    This is a deliberate guard against backdated changes: once a price-only
    edit stopped being blocked by stock availability (see
    actionEditReceivingDoc), Receiving could otherwise freely rewrite a GR
@@ -1159,11 +1165,11 @@ function isSameJakartaDay(isoString){
 function canEditReceivingDoc(role, doc){
   if(!doc) return false;
   if(role.kind==='master') return true;
-  if(role.kind==='receiving') return isSameJakartaDay(doc.createdAt);
+  if(role.kind==='receiving') return isWithinReceivingEditWindow(doc.createdAt);
   return false;
 }
 function receivingEditLockedNotice(){
-  toast('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubah atau menghapusnya.', true);
+  toast('Penerimaan ini sudah lewat 1 minggu dari tanggal dibuatnya -- hubungi akun Master untuk mengubah atau menghapusnya.', true);
 }
 /* Every role can view Dashboard except a plain division account -- Service
    Leader is the one division-kind exception (it also oversees several
@@ -1945,8 +1951,8 @@ async function actionEditReceivingDoc(docNumber, payload){
   if(existingLines.length===0) throw new Error('Penerimaan tidak ditemukan.');
   const first = existingLines[0];
   // Defensive re-check (openReceivingModal already gated opening the form on
-  // this) -- same-day-only for Receiving, Master unrestricted.
-  if(!canEditReceivingDoc(currentRole(), first)) throw new Error('Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master.');
+  // this) -- 1-week window for Receiving, Master unrestricted.
+  if(!canEditReceivingDoc(currentRole(), first)) throw new Error('Penerimaan ini sudah lewat 1 minggu dari tanggal dibuatnya -- hubungi akun Master.');
   const keepIds = new Set();
   // payload.lines is in the order shown/edited in the form -- write that
   // position back as each line's lineIndex (see actionReceivingDoc) so the
@@ -2025,7 +2031,7 @@ function confirmDeleteReceiving(docNumber){
   if(lines.length===0) return;
   const role = currentRole();
   if(!canEditReceivingDoc(role, lines[0])){
-    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat 1 minggu dari tanggal dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
     return;
   }
   openConfirm('Hapus Penerimaan', `Hapus Penerimaan ${docNumber}? Stok yang sudah masuk dari dokumen ini akan dikurangi kembali. Tindakan ini tidak bisa dibatalkan.`, ()=>actionDeleteReceiving(docNumber), 'Hapus', true);
@@ -2035,7 +2041,7 @@ async function actionDeleteReceiving(docNumber){
   if(lines.length===0) return;
   const role = currentRole();
   if(!canEditReceivingDoc(role, lines[0])){
-    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
+    toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat 1 minggu dari tanggal dibuatnya -- hubungi akun Master untuk menghapusnya.' : 'Anda tidak dapat menghapus penerimaan ini.', true);
     return;
   }
   try{
@@ -6553,8 +6559,8 @@ function renderReceiving(){
                         <span class="cell-sub" style="margin-left:8px;">${fmtDate(d.createdAt)} · ${escapeHtml(first.supplierName||'Tanpa Supplier')}${first.doNumber?' · DO '+escapeHtml(first.doNumber):''}</span>
                       </div>
                       ${canEditR ? `<div style="display:flex; gap:6px; flex-shrink:0;" onclick="event.stopPropagation()">
-                        <button class="icon-btn ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Edit':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`openReceivingModal('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.edit:ICONS.lock}</button>
-                        <button class="icon-btn icon-btn-danger ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Hapus':'Sudah lewat hari penerimaan -- hubungi Master'}" onclick="${docEditable?`confirmDeleteReceiving('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.trash:ICONS.lock}</button>
+                        <button class="icon-btn ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Edit':'Sudah lewat 1 minggu -- hubungi Master'}" onclick="${docEditable?`openReceivingModal('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.edit:ICONS.lock}</button>
+                        <button class="icon-btn icon-btn-danger ${docEditable?'':'icon-btn-locked'}" title="${docEditable?'Hapus':'Sudah lewat 1 minggu -- hubungi Master'}" onclick="${docEditable?`confirmDeleteReceiving('${d.docNumber}')`:'receivingEditLockedNotice()'}">${docEditable?ICONS.trash:ICONS.lock}</button>
                       </div>` : ''}
                     </div>
                   </td>
@@ -9902,7 +9908,7 @@ function grConfirmDeleteDraft(draftId){
 /* editDocNumber: when set, prefills the form from an existing 'in' document
    and routes submit to actionEditReceivingDoc instead of creating a new one.
    Editing/deleting a receipt is gated by canEditReceivingDoc (Master anytime,
-   Receiving same-day-only -- see its own comment) -- a late PDF attachment
+   Receiving 1-week window -- see its own comment) -- a late PDF attachment
    stays canEditMaster's plain, unrestricted reach,
    since attaching a scanned invoice days later never changes any recorded
    qty/price/stock. draftId: when set (and not editing), resumes that
@@ -9918,7 +9924,7 @@ function openReceivingModal(editDocNumber, draftId){
     if(existingLines.length===0) return;
     first = existingLines[0];
     if(!canEditReceivingDoc(role, first)){
-      toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat hari dibuatnya -- hubungi akun Master untuk mengubahnya.' : 'Anda tidak dapat mengubah penerimaan ini.', true);
+      toast(canEditMaster(role) ? 'Penerimaan ini sudah lewat 1 minggu dari tanggal dibuatnya -- hubungi akun Master untuk mengubahnya.' : 'Anda tidak dapat mengubah penerimaan ini.', true);
       return;
     }
     receivingLines = existingLines.map(l=>({
