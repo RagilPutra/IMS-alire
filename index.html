@@ -134,9 +134,15 @@
      it wins), the badge inherited flex:1 too and stretched to fill whatever
      width the label text didn't use, growing/shrinking as the window
      resized instead of staying pill-sized around its number. */
-  .nav-item .nav-badge{flex:none; margin-left:auto; background:var(--warning); color:#2A1E0C; font-size:11px; font-weight:800; border-radius:20px; padding:2px 8px; min-width:20px; text-align:center;}
-  .nav-dot-group{margin-left:auto; display:flex; gap:3px; flex-shrink:0;}
-  .nav-dot{font-size:10px; font-weight:800; border-radius:20px; padding:1px 6px; min-width:16px; text-align:center;}
+  .nav-item > span:first-of-type{flex:0 1 auto;}
+  .nav-item .nav-badge{flex:1 1 0; min-width:max-content; max-width:40px; background:var(--warning); color:#2A1E0C; font-size:11px; font-weight:800; border-radius:20px; padding:2px 8px; text-align:center;}
+  /* Badges grow with the sidebar but stop at a max size (40px per pill), and shrink back down to just their number when the
+     sidebar is narrowed. Basis 0 + min-width:max-content means the label
+     text (flex-basis auto) keeps priority and ellipsizes first, so the badge
+     can never push "Permintaan WIP" into truncation. The dot group and the
+     dots inside it are spans too, hence the explicit rules. */
+  .nav-item .nav-dot-group{flex:1 1 0; min-width:max-content; max-width:82px; display:flex; gap:3px; justify-content:flex-start;}
+  .nav-item .nav-dot{flex:1 1 0; min-width:max-content; max-width:40px; font-size:10px; font-weight:800; border-radius:20px; padding:1px 6px; text-align:center;}
   .nav-dot.warning{background:var(--warning); color:#2A1E0C;}
   .nav-dot.danger{background:var(--danger); color:#fff;}
   .sidebar-profile{display:flex; align-items:center; gap:9px; width:100%; text-align:left; border:none; background:none; border-top:1px solid var(--border); padding:13px 18px; cursor:pointer;}
