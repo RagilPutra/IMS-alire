@@ -3890,6 +3890,7 @@ function renderInventory(){
       <div class="filter-row" style="border-bottom:none; padding-bottom:6px;">
         <input type="text" id="invSearchInput" style="flex:1; min-width:220px;" placeholder="Cari nama atau kode barang…" value="${escapeHtml(state.invSearch)}" oninput="setInvSearch(this.value)">
         ${filtersActive ? `<button class="btn btn-sm btn-outline" onclick="resetInvFilters()">Reset</button>` : ''}
+        ${role.kind==='master' ? `<button class="btn btn-sm btn-primary" onclick="exportInventoryExcel()">${ICONS.download||''} Download Excel</button>` : ''}
       </div>
       <div class="filter-row" style="padding-top:0;">
         <select onchange="setInvCategory(this.value)"><option value="">Semua Kategori</option>${ITEM_CATEGORIES.map(c=>`<option value="${c}" ${state.invCategory===c?'selected':''}>${c}</option>`).join('')}</select>
@@ -3937,6 +3938,91 @@ function renderInventory(){
       ${paginationHtml(state.invPage, totalPages, rows.length, pageSize, 'setInvPage', 'baris')}
     </div>
   `;
+}
+/* Master-only Excel export of the Inventory screen, honoring whatever
+   filters/sort are active (lokasi, peruntukan, kategori, pencarian). Unlike
+   the on-screen table -- which collapses "Semua Lokasi" into one summed row
+   per item -- the export breaks stock out one row per item x lokasi, and for
+   the storage warehouse (Gudang Utama) one row per item x peruntukan, so the
+   Peruntukan column is always filled where it applies ("—" for divisi
+   warehouses, which have no peruntukan). */
+async function exportInventoryExcel(){
+  if(currentRole().kind !== 'master'){ toast('Hanya akun Master yang bisa mengunduh Excel inventory.', true); return; }
+  if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
+  const items = getFilteredInventoryRows().map(r=>r.item); // already filtered + sorted
+  const locFilter = state.invLocation, pFilter = state.invPeruntukan;
+  const whs = locFilter ? WAREHOUSES.filter(w=>w.id===locFilter) : WAREHOUSES;
+  const body = [];
+  let grand = 0;
+  items.forEach(item=>{
+    const price = item.lastPrice||0;
+    const pushRow = (w, perLabel, qty)=>{
+      const nilai = qty*price; grand += nilai;
+      body.push([item.kode||'', item.name||'', item.category||'', w.name, perLabel, qty, item.uom||'', Math.round(price), Math.round(nilai)]);
+    };
+    whs.forEach(w=>{
+      const qty = stockQty(w.id, item.id);
+      if(!(qty > 0)) return;
+      if(isStorageWarehouse(w.id)){
+        let used = 0;
+        PERUNTUKAN_OPTIONS.forEach(p=>{
+          if(pFilter && p.id !== pFilter) return;
+          const q = stockQtyByPeruntukan(w.id, item.id, p.id);
+          if(q > 0){ used += q; pushRow(w, p.name, q); }
+        });
+        // Defensive: stock tagged with a peruntukan id that isn't in PERUNTUKAN_OPTIONS.
+        const rest = qty - PERUNTUKAN_OPTIONS.reduce((sum,p)=>sum+stockQtyByPeruntukan(w.id, item.id, p.id), 0);
+        if(!pFilter && rest > 0.0001) pushRow(w, 'Lainnya', rest);
+      } else if(!pFilter){
+        pushRow(w, '—', qty);
+      }
+    });
+  });
+  if(!body.length){ toast('Tidak ada data untuk diekspor.', true); return; }
+  const COLS = 9;
+  const filterBits = [
+    locFilter ? whById(locFilter).name : 'Semua Lokasi',
+    pFilter ? 'Peruntukan: '+peruntukanName(pFilter) : null,
+    state.invCategory ? 'Kategori: '+state.invCategory : null,
+    state.invSearch ? 'Cari: '+state.invSearch : null,
+  ].filter(Boolean).join(' · ');
+  const aoa = [
+    ['ALIRE SAJIAN NUSANTARA'],
+    ['Inventory — ' + filterBits],
+    ['Dicetak', fmtDate(new Date().toISOString())],
+    [],
+    ['Kode','Nama Barang','Kategori','Lokasi','Peruntukan','Jumlah','Satuan','Harga/Satuan','Nilai Stok'],
+    ...body,
+  ];
+  const headerRowIdx = 4;
+  const totalRow = aoa.length;
+  aoa.push(['','','','','','','','TOTAL NILAI STOK', Math.round(grand)]);
+  const wb = XLSXStyle.utils.book_new();
+  const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:COLS-1}}, {s:{r:1,c:0}, e:{r:1,c:COLS-1}} ];
+  ws['!cols'] = [{wch:14},{wch:32},{wch:18},{wch:20},{wch:14},{wch:12},{wch:9},{wch:14},{wch:16}];
+  xlsxSetQtyColFormats(ws, [5], headerRowIdx+1);
+  xlsxSetColFormats(ws, {7: XLFMT_RP, 8: XLFMT_RP}, headerRowIdx+1);
+  xlCell(ws, 0, 0).s = xlTitleStyle(14);
+  xlCell(ws, 1, 0).s = xlTitleStyle(11);
+  xlStyleRow(ws, 2, 2, xlMetaStyle());
+  xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
+  xlStyleBody(ws, headerRowIdx+1, totalRow+1, COLS, [5,7,8]);
+  xlStyleRow(ws, totalRow, COLS, xlTotalStyle());
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Inventory');
+  const stamp = new Date().toISOString().slice(0,10);
+  const filename = 'Inventory_' + (locFilter ? whById(locFilter).name.replace(/[^A-Za-z0-9]+/g,'_') : 'Semua_Lokasi') + '_' + stamp + '.xlsx';
+  try{
+    // The Artifact's sandboxed frame can't trigger a plain browser download
+    // (writeFile does nothing there) -- go through downloadTextFile, which
+    // uses the platform's downloads capability when present and a normal
+    // Blob download otherwise (Railway).
+    const buf = XLSXStyle.write(wb, {bookType:'xlsx', type:'array'});
+    const result = await downloadTextFile(filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buf);
+    if(result === 'saved') toast('Excel inventory berhasil dibuat.');
+  }catch(e){
+    toast((e && e.message) || 'Gagal membuat Excel inventory.', true);
+  }
 }
 function resetInvFilters(){ state.invSearch=''; state.invCategory=''; state.invLocation=''; state.invPeruntukan=''; state.invSort='name_asc'; state.invPage=1; render(); }
 
