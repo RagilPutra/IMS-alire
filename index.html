@@ -3890,7 +3890,6 @@ function renderInventory(){
       <div class="filter-row" style="border-bottom:none; padding-bottom:6px;">
         <input type="text" id="invSearchInput" style="flex:1; min-width:220px;" placeholder="Cari nama atau kode barang…" value="${escapeHtml(state.invSearch)}" oninput="setInvSearch(this.value)">
         ${filtersActive ? `<button class="btn btn-sm btn-outline" onclick="resetInvFilters()">Reset</button>` : ''}
-        ${role.kind==='master' ? `<button class="btn btn-sm btn-primary" onclick="exportInventoryExcel()">${ICONS.download||''} Download Excel</button>` : ''}
       </div>
       <div class="filter-row" style="padding-top:0;">
         <select onchange="setInvCategory(this.value)"><option value="">Semua Kategori</option>${ITEM_CATEGORIES.map(c=>`<option value="${c}" ${state.invCategory===c?'selected':''}>${c}</option>`).join('')}</select>
@@ -3939,79 +3938,79 @@ function renderInventory(){
     </div>
   `;
 }
-/* Master-only Excel export of the Inventory screen, honoring whatever
-   filters/sort are active (lokasi, peruntukan, kategori, pencarian). Unlike
-   the on-screen table -- which collapses "Semua Lokasi" into one summed row
-   per item -- the export breaks stock out one row per item x lokasi, and for
-   the storage warehouse (Gudang Utama) one row per item x peruntukan, so the
-   Peruntukan column is always filled where it applies ("—" for divisi
-   warehouses, which have no peruntukan). */
-async function exportInventoryExcel(){
-  if(currentRole().kind !== 'master'){ toast('Hanya akun Master yang bisa mengunduh Excel inventory.', true); return; }
+/* Master-only Excel export of the full Master Barang catalog (Setting page).
+   Lists EVERY goods item in state.items -- including items whose stock is 0 --
+   and leaves out WIP Kitchen / WIP Bar (those live in their own master and
+   have no stock). Not tied to the Inventory page's filters. Stock is broken
+   out one row per item x lokasi, and for the storage warehouse (Gudang
+   Utama) one row per item x peruntukan; "—" for divisi warehouses (no
+   peruntukan). An item with no stock anywhere gets a single row with
+   Lokasi/Peruntukan "—" and Jumlah 0 so it still appears in the file. */
+async function exportMasterBarangExcel(){
+  if(currentRole().kind !== 'master'){ toast('Hanya akun Master yang bisa mengunduh Excel master barang.', true); return; }
   if(!window.XLSXStyle){ toast('Library Excel belum siap termuat, coba lagi sebentar.', true); return; }
-  const items = getFilteredInventoryRows().map(r=>r.item); // already filtered + sorted
-  const locFilter = state.invLocation, pFilter = state.invPeruntukan;
-  const whs = locFilter ? WAREHOUSES.filter(w=>w.id===locFilter) : WAREHOUSES;
+  const items = state.items
+    .filter(i=>i.category!=='WIP Kitchen' && i.category!=='WIP Bar')
+    .slice()
+    .sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  if(!items.length){ toast('Tidak ada barang untuk diekspor.', true); return; }
   const body = [];
-  let grand = 0;
+  let grand = 0, withStock = 0;
   items.forEach(item=>{
     const price = item.lastPrice||0;
-    const pushRow = (w, perLabel, qty)=>{
+    const smallUnit = hasSmallUnitConversion(item) ? item.smallUnit : '';
+    const startLen = body.length;
+    const pushRow = (lokasi, perLabel, qty)=>{
       const nilai = qty*price; grand += nilai;
-      body.push([item.kode||'', item.name||'', item.category||'', w.name, perLabel, qty, item.uom||'', Math.round(price), Math.round(nilai)]);
+      body.push([item.kode||'', item.name||'', item.category||'', lokasi, perLabel, qty, item.uom||'', smallUnit, Math.round(price), Math.round(nilai)]);
     };
-    whs.forEach(w=>{
+    WAREHOUSES.forEach(w=>{
       const qty = stockQty(w.id, item.id);
       if(!(qty > 0)) return;
       if(isStorageWarehouse(w.id)){
-        let used = 0;
         PERUNTUKAN_OPTIONS.forEach(p=>{
-          if(pFilter && p.id !== pFilter) return;
           const q = stockQtyByPeruntukan(w.id, item.id, p.id);
-          if(q > 0){ used += q; pushRow(w, p.name, q); }
+          if(q > 0) pushRow(w.name, p.name, q);
         });
         // Defensive: stock tagged with a peruntukan id that isn't in PERUNTUKAN_OPTIONS.
         const rest = qty - PERUNTUKAN_OPTIONS.reduce((sum,p)=>sum+stockQtyByPeruntukan(w.id, item.id, p.id), 0);
-        if(!pFilter && rest > 0.0001) pushRow(w, 'Lainnya', rest);
-      } else if(!pFilter){
-        pushRow(w, '—', qty);
+        if(rest > 0.0001) pushRow(w.name, 'Lainnya', rest);
+      } else {
+        pushRow(w.name, '—', qty);
       }
     });
+    if(body.length === startLen) pushRow('—', '—', 0);
+    else withStock++;
   });
-  if(!body.length){ toast('Tidak ada data untuk diekspor.', true); return; }
-  const COLS = 9;
-  const filterBits = [
-    locFilter ? whById(locFilter).name : 'Semua Lokasi',
-    pFilter ? 'Peruntukan: '+peruntukanName(pFilter) : null,
-    state.invCategory ? 'Kategori: '+state.invCategory : null,
-    state.invSearch ? 'Cari: '+state.invSearch : null,
-  ].filter(Boolean).join(' · ');
+  const COLS = 10;
   const aoa = [
     ['ALIRE SAJIAN NUSANTARA'],
-    ['Inventory — ' + filterBits],
+    ['Master Barang — ' + items.length + ' barang (' + withStock + ' dengan stok, ' + (items.length-withStock) + ' stok 0), tidak termasuk WIP'],
     ['Dicetak', fmtDate(new Date().toISOString())],
     [],
-    ['Kode','Nama Barang','Kategori','Lokasi','Peruntukan','Jumlah','Satuan','Harga/Satuan','Nilai Stok'],
+    ['Kode','Nama Barang','Kategori','Lokasi','Peruntukan','Jumlah','Satuan','Satuan Kecil','Harga/Satuan','Nilai Stok'],
     ...body,
   ];
   const headerRowIdx = 4;
   const totalRow = aoa.length;
-  aoa.push(['','','','','','','','TOTAL NILAI STOK', Math.round(grand)]);
+  aoa.push(['','','','','','','','','TOTAL NILAI STOK', Math.round(grand)]);
   const wb = XLSXStyle.utils.book_new();
   const ws = XLSXStyle.utils.aoa_to_sheet(aoa);
   ws['!merges'] = [ {s:{r:0,c:0}, e:{r:0,c:COLS-1}}, {s:{r:1,c:0}, e:{r:1,c:COLS-1}} ];
-  ws['!cols'] = [{wch:14},{wch:32},{wch:18},{wch:20},{wch:14},{wch:12},{wch:9},{wch:14},{wch:16}];
+  ws['!cols'] = [{wch:14},{wch:32},{wch:20},{wch:20},{wch:14},{wch:12},{wch:9},{wch:12},{wch:14},{wch:16}];
   xlsxSetQtyColFormats(ws, [5], headerRowIdx+1);
-  xlsxSetColFormats(ws, {7: XLFMT_RP, 8: XLFMT_RP}, headerRowIdx+1);
+  xlsxSetColFormats(ws, {8: XLFMT_RP, 9: XLFMT_RP}, headerRowIdx+1);
   xlCell(ws, 0, 0).s = xlTitleStyle(14);
   xlCell(ws, 1, 0).s = xlTitleStyle(11);
   xlStyleRow(ws, 2, 2, xlMetaStyle());
   xlStyleRow(ws, headerRowIdx, COLS, xlHeaderStyle());
-  xlStyleBody(ws, headerRowIdx+1, totalRow+1, COLS, [5,7,8]);
+  xlStyleBody(ws, headerRowIdx+1, totalRow+1, COLS, [5,8,9]);
   xlStyleRow(ws, totalRow, COLS, xlTotalStyle());
-  XLSXStyle.utils.book_append_sheet(wb, ws, 'Inventory');
-  const stamp = new Date().toISOString().slice(0,10);
-  const filename = 'Inventory_' + (locFilter ? whById(locFilter).name.replace(/[^A-Za-z0-9]+/g,'_') : 'Semua_Lokasi') + '_' + stamp + '.xlsx';
+  XLSXStyle.utils.book_append_sheet(wb, ws, 'Master Barang');
+  const filename = 'Master_Barang_' + new Date().toISOString().slice(0,10) + '.xlsx';
+  const btn = document.getElementById('btnExportMasterBarang');
+  const origHtml = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.textContent = 'Membuat Excel…'; }
   try{
     // The Artifact's sandboxed frame can't trigger a plain browser download
     // (writeFile does nothing there) -- go through downloadTextFile, which
@@ -4019,9 +4018,12 @@ async function exportInventoryExcel(){
     // Blob download otherwise (Railway).
     const buf = XLSXStyle.write(wb, {bookType:'xlsx', type:'array'});
     const result = await downloadTextFile(filename, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', buf);
-    if(result === 'saved') toast('Excel inventory berhasil dibuat.');
+    if(result === 'saved') toast('Excel master barang berhasil dibuat.');
   }catch(e){
-    toast((e && e.message) || 'Gagal membuat Excel inventory.', true);
+    toast((e && e.message) || 'Gagal membuat Excel master barang.', true);
+  }finally{
+    const b = document.getElementById('btnExportMasterBarang');
+    if(b){ b.disabled = false; b.innerHTML = origHtml; }
   }
 }
 function resetInvFilters(){ state.invSearch=''; state.invCategory=''; state.invLocation=''; state.invPeruntukan=''; state.invSort='name_asc'; state.invPage=1; render(); }
@@ -9646,6 +9648,13 @@ function renderSetting(){
           <button class="btn btn-outline" id="btnExportSeed" onclick="exportDatabaseBackup(true)">${ICONS.download||''} Download untuk Project Baru (seed-data.json)</button>
         </div>
         <div class="lock-note" style="margin-top:10px;">Tombol kedua langsung menghasilkan file <b>seed-data.json</b> — file inilah yang ditimpakan ke <code>migrate/seed-data.json</code> di project Railway baru, lalu jalankan <code>npm run migrate</code> di sana untuk mengisi database project baru tersebut.</div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:16px;">
+      <div class="panel-head"><h3>Export Master Barang</h3></div>
+      <div class="panel-body" style="padding:14px 16px;">
+        <div class="lock-note" style="margin-bottom:12px;">Mengunduh seluruh barang di Master Barang sebagai file Excel — termasuk barang yang stoknya 0, lengkap dengan Satuan Kecil, Peruntukan, dan nilai stok. Barang WIP tidak ikut.</div>
+        <button class="btn btn-primary" id="btnExportMasterBarang" onclick="exportMasterBarangExcel()">${ICONS.download||''} Download Excel Master Barang</button>
       </div>
     </div>` : ''}
   `;
