@@ -1111,6 +1111,15 @@ function currentRole(){ return ROLES.find(r=>r.id===state.role) || ROLES[0]; }
 function canManageGudang(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canApproveSR(role){ return role.kind==='master' || role.kind==='receiving'; }
 function canApproveKitchenGate(role){ return role.kind==='kitchen_leader'; }
+/* Who may pass the Kitchen Leader gate on a request of a given division:
+   the owning Kitchen Leader, or Master acting as Kitchen Leader (any
+   division). canApproveKitchenGate above stays Kitchen-Leader-only on
+   purpose -- it also drives the leader-specific notif list/dashboard, where
+   Master must keep seeing the Receiving-stage queue. */
+function canActAsKitchenGate(role, divisionId){
+  if(role.kind==='master') return true;
+  return role.kind==='kitchen_leader' && !!role.divisionIds && role.divisionIds.includes(divisionId);
+}
 function canCreateSR(role){ return role.kind==='master' || role.kind==='divisi' || role.kind==='kitchen_leader'; }
 function canEditSR(role, sr){
   if(!sr) return false;
@@ -1119,6 +1128,9 @@ function canEditSR(role, sr){
   // division to remove/adjust an out-of-stock item themselves before an
   // approval could go through.
   if(role.kind==='receiving') return true;
+  // Master has full admin reach over every pending request (edit as well as
+  // delete -- canDeleteSR already let Master delete any pending request).
+  if(role.kind==='master') return true;
   if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(sr.divisionId)) return true;
   if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(sr.divisionId)){
     // Once Kitchen Leader has approved this request's kitchen gate, the
@@ -1262,12 +1274,11 @@ function canDeleteWip(role, w){
   if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
   return false;
 }
-/* Editing mirrors canEditSR's reach exactly (Receiving, Kitchen Leader of the
-   owning division, and the requesting divisi itself) -- Master is covered by
-   canDeleteWip's own standing admin bypass instead, same asymmetry as
-   canEditSR/canDeleteSR for Permintaan Barang (SR). */
+/* Editing mirrors canEditSR's reach exactly (Master, Receiving, Kitchen
+   Leader of the owning division, and the requesting divisi itself). */
 function canEditWip(role, w){
   if(!w || w.status!=='menunggu') return false;
+  if(role.kind==='master') return true;
   if(role.kind==='receiving') return true;
   if(role.kind==='kitchen_leader' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
   if(role.kind==='divisi' && role.divisionIds && role.divisionIds.includes(w.divisionId)) return true;
@@ -1308,7 +1319,14 @@ function rebuildStockIndex(){
     }
   });
 }
-function rebuildItemIndex(){ itemIndex = {}; state.items.forEach(i=>{ itemIndex[i.id] = i; }); }
+/* itemIndex (itemById) covers EVERY item doc, including archived ones;
+   state.items holds only the active catalog. Archived items are old master
+   records retired by a master-data cleanup: they're hidden from Master
+   Barang, pickers, Inventory, exports and stock, but must stay resolvable by
+   id because historical records (Stok Opname snapshots, past transactions,
+   Laporan SO category/unit display) still point at them -- without them an
+   old period's report would silently change. */
+function rebuildItemIndex(){ itemIndex = {}; (state.allItems || state.items).forEach(i=>{ itemIndex[i.id] = i; }); }
 function stockQty(warehouseId, itemId){ return stockIndex[warehouseId+'__'+itemId] || 0; }
 function stockQtyByPeruntukan(warehouseId, itemId, peruntukan){ return peruntukanIndex[warehouseId+'__'+itemId+'__'+(peruntukan||'mix')] || 0; }
 function itemById(id){ return itemIndex[id]; }
@@ -1581,7 +1599,8 @@ async function initDb(){
   dbReady = true;
 
   db.collection('items').onSnapshot(snap=>{
-    state.items = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    state.allItems = snap.docs.map(d=>({id:d.id, ...d.data()})).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+    state.items = state.allItems.filter(i=>!i.archived);
     rebuildItemIndex();
     const liveIds = new Set(state.items.map(i=>i.id));
     [...state.itemsSelected].forEach(id=>{ if(!liveIds.has(id)) state.itemsSelected.delete(id); });
@@ -1853,7 +1872,7 @@ async function applyStorageIncrease(warehouseId, itemId, addQty){
    collides, instead of guessing from the item count (which drifts once
    any item is deleted or codes have gaps). */
 function nextItemCode(category){
-  const items = state.items;
+  const items = state.allItems || state.items; // include archived so a new code never reuses a retired item's code
   if(category === 'WIP Kitchen' || category === 'WIP Bar'){
     const prefix = category === 'WIP Kitchen' ? 'K' : 'B';
     const re = new RegExp('^' + prefix + '-(\\d+)$', 'i');
@@ -2100,12 +2119,12 @@ async function actionStoreRequestDoc(payload){
 }
 async function actionApproveKitchenGate(docNumber){
   const role = currentRole();
-  if(!canApproveKitchenGate(role)){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
   const lines = state.srTransactions.filter(t=>t.type==='request' && t.docNumber===docNumber && isKitchenGatePending(t));
   if(lines.length===0){ toast('Permintaan ini tidak lagi menunggu Kitchen Leader.', true); return; }
+  if(!canActAsKitchenGate(role, lines[0].divisionId)){ toast('Hanya Kitchen Leader (atau Master) yang dapat menyetujui di tahap ini.', true); return; }
   try{
     for(const line of lines){
-      await db.doc('transactions/'+line.id).update({ kitchenGateStatus:'passed', kitchenGateDecidedAt: new Date().toISOString(), kitchenGateByRole: state.role });
+      await db.doc('transactions/'+line.id).update({ kitchenGateStatus:'passed', kitchenGateDecidedAt: new Date().toISOString(), kitchenGateByRole: state.role, kitchenGateByRoleName: role.name });
     }
     toast('Permintaan ' + docNumber + ' diteruskan ke Receiving.');
   }catch(err){
@@ -3133,6 +3152,7 @@ function notifPanelHtml(){
   const docs = {};
   state.transactions.filter(t=>{
     if(t.type!=='request' || t.status!=='menunggu') return false;
+    if(role.kind==='master') return true; // Master can act at both stages (Kitchen Leader gate + Receiving)
     if(canApproveKitchenGate(role)) return isKitchenGatePending(t) && role.divisionIds && role.divisionIds.includes(t.divisionId);
     if(canApproveSR(role)) return !isKitchenGatePending(t);
     return false;
@@ -6241,11 +6261,19 @@ function renderStoreRequests(){
                   <td>${fmtDate(d.createdAt)}</td>
                   <td class="cell-title">${escapeHtml(first.divisionName || first.toWarehouseName)}</td>
                   <td>${d.lines.length} barang</td>
-                  <td>${srDocStatusTag(d.lines)}</td>
+                  <td>${srDocStatusTag(d.lines)}${(function(){
+                    // Receiving/Master heads-up: pending lines whose stock is
+                    // empty or short in Gudang Utama for this division.
+                    if(!canApprove) return '';
+                    const warns = srDocStockWarnings(d.lines);
+                    if(warns.length===0) return '';
+                    const tip = warns.map(w=>w.line.itemName+' — '+(w.info.state==='habis'?'stok habis':'stok kurang (tersedia '+fmtNum(w.info.available)+', diminta '+fmtNum(w.info.needed)+')')).join('\n');
+                    return ` <span class="tag tag-rejected" style="margin-left:4px;" title="${escapeHtml(tip)}">⚠ ${warns.length} barang stok ${warns.every(w=>w.info.state==='habis')?'habis':'habis/kurang'}</span>`;
+                  })()}</td>
                   <td>${(function(){
                     if(!pendingLine) return '';
                     const kitchenPending = isKitchenGatePending(pendingLine);
-                    if(kitchenPending && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(pendingLine.divisionId)){
+                    if(kitchenPending && canActAsKitchenGate(role, pendingLine.divisionId)){
                       return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
                         <button class="btn btn-sm btn-approve" onclick="confirmApproveKitchenGate('${d.docNumber}')">Setujui</button>
                         <button class="btn btn-sm btn-danger-outline" onclick="openRejectModal('${d.docNumber}')">Tolak</button>
@@ -6327,7 +6355,7 @@ function renderWipRequests(){
                   <td>${(function(){
                     const isPending = first.status==='menunggu';
                     const gatePending = isWipGatePending(first);
-                    if(isPending && gatePending && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId)){
+                    if(isPending && gatePending && canActAsKitchenGate(role, first.divisionId)){
                       return `<div style="display:flex; gap:6px;" onclick="event.stopPropagation()">
                         <button class="btn btn-sm btn-approve" onclick="confirmApproveWipGate('${d.docNumber}')">Setujui</button>
                         <button class="btn btn-sm btn-danger-outline" onclick="openRejectWipModal('${d.docNumber}')">Tolak</button>
@@ -6470,17 +6498,27 @@ function openSrDetail(docNumber){
         // Per-line status/transfer/reject-note, since a document's lines can
         // each be at a different stage after a partial approval -- one
         // doc-level status is no longer enough to describe every row.
+        const stockInfo = canApproveSR(role) ? srLineStockState(l) : null;
         const lineStatusHtml = `<div>${srStatusTag(l)}</div>`
+          + (stockInfo ? `<div style="margin-top:3px;"><span class="tag tag-rejected">⚠ ${stockInfo.state==='habis' ? 'Stok habis' : 'Stok kurang'}</span></div><div class="cell-sub">Tersedia ${fmtNum(stockInfo.available)} ${escapeHtml(l.uom||'')}</div>` : '')
           + (l.status==='disetujui' && l.transferDocNumber ? `<div class="cell-sub">Transfer: <b>${escapeHtml(l.transferDocNumber)}</b></div>` : '')
           + (l.status==='ditolak' && l.rejectNote ? `<div class="cell-sub">Alasan: ${escapeHtml(l.rejectNote)}</div>` : '');
         return `<tr><td>${escapeHtml(l.itemName)}${requesterNote}${leaderNoteHtml}</td><td class="num">${primary}${sub}</td><td>${lineStatusHtml}</td></tr>`;
       }).join('')}</tbody></table>
     </div>
     <div style="margin-top:12px;">Status Permintaan: ${srDocStatusTag(lines)}</div>
-    ${pendingLine && isKitchenGatePending(pendingLine) && canApproveSR(role) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
+    ${(function(){
+      if(!canApproveSR(role)) return '';
+      const warns = srDocStockWarnings(lines);
+      if(warns.length===0) return '';
+      return `<div class="lock-note" style="margin-top:10px; border-color:var(--danger);"><b>⚠ ${warns.length} barang stoknya habis/kurang di Gudang Utama:</b>
+        <ul style="margin:6px 0 0; padding-left:18px;">${warns.map(w=>`<li>${escapeHtml(w.line.itemName)} — ${w.info.state==='habis' ? 'stok habis' : 'tersedia '+fmtNum(w.info.available)+', diminta '+fmtNum(w.info.needed)}</li>`).join('')}</ul>
+        <div style="margin-top:6px;">Gunakan <b>Edit</b> untuk menyesuaikan jumlah/barang, atau biarkan menunggu sampai stok tersedia.</div></div>`;
+    })()}
+    ${pendingLine && isKitchenGatePending(pendingLine) && canApproveSR(role) && !canActAsKitchenGate(role, pendingLine.divisionId) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
   `;
   const canApprove = canApproveSR(role);
-  const canKitchenGate = !!pendingLine && canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(pendingLine.divisionId);
+  const canKitchenGate = !!pendingLine && canActAsKitchenGate(role, pendingLine.divisionId);
   const kitchenPending = !!pendingLine && isKitchenGatePending(pendingLine);
   const canEdit = !!pendingLine && canEditSR(role, pendingLine);
   let foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
@@ -6581,11 +6619,11 @@ function openWipDetail(docNumber){
     </div>
     <div style="margin-top:12px;">Status: ${wipStatusTag(first)}</div>
     ${first.status==='ditolak' && first.rejectNote ? `<div class="cell-sub" style="margin-top:6px;">Alasan penolakan: ${escapeHtml(first.rejectNote)}</div>` : ''}
-    ${isWipGatePending(first) && canApproveSR(role) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
+    ${isWipGatePending(first) && canApproveSR(role) && !canActAsKitchenGate(role, first.divisionId) ? `<div class="lock-note" style="margin-top:10px;">Permintaan ini harus disetujui Kitchen Leader terlebih dahulu sebelum bisa diproses di sini.</div>` : ''}
     <div class="cell-sub" style="margin-top:10px;">Catatan: Permintaan WIP murni logbook — tidak memengaruhi stok/inventory maupun Stok Opname.</div>
   `;
   const canApprove = canApproveSR(role);
-  const canGate = canApproveKitchenGate(role) && role.divisionIds && role.divisionIds.includes(first.divisionId);
+  const canGate = canActAsKitchenGate(role, first.divisionId);
   const gatePending = isWipGatePending(first);
   let foot = `<button class="btn btn-outline" onclick="closeModal()">Tutup</button>`;
   if(canDeleteWip(role, first)) foot += `<button class="btn btn-danger-outline" onclick="closeModal(); confirmDeleteWip('${docNumber}')">Hapus</button>`;
@@ -9673,7 +9711,7 @@ function confirmLogout(){ openConfirm('Keluar', 'Keluar dari akun ini?', logout,
 // partial "recent activity" snapshot. Works unchanged on both the Claude
 // Artifact (real Firestore) and the Railway deploy (its Firestore-lite
 // shim over Postgres) since both expose the same db.collection(x).get().
-const BACKUP_COLLECTIONS = ['users','items','stock','transactions','suppliers','opnameSessions','opnameDrafts','monthlyNetSales'];
+const BACKUP_COLLECTIONS = ['users','items','stock','transactions','suppliers','opnameSessions','opnameDetails','opnameDrafts','monthlyNetSales'];
 // forSeed=false (default): a human-readable full backup, one JSON file with
 // every collection's documents spread flat ({id, ...fields}) under a
 // metadata wrapper.
@@ -10177,13 +10215,39 @@ function srAvailableItemsPool(divisionId){
   const division = divisionById(divisionId);
   const peruntukan = division ? division.wh : divisionId;
   if(!peruntukan) return [];
+  /* An item qualifies if Gudang Utama has (or ever had) a stock record for it
+     under this division's Peruntukan or Mix Use -- NOT only when the balance
+     is above zero. Stock docs are never deleted when they hit 0, so a key
+     that exists in peruntukanIndex with a 0 balance means "this item is
+     allocated to this division but is currently out". Those stay requestable
+     (flagged "Stok habis" in the picker, and flagged for Receiving on the
+     request itself, see srLineStockState) so a division can still ask for
+     something that ran out; items never allocated to this division/Mix Use
+     remain hidden, same as before. */
   return nonWipItemsPool().filter(i=>{
     return STORAGE_WAREHOUSES.some(w=>{
-      const own = stockQtyByPeruntukan(w.id, i.id, peruntukan);
-      const mix = stockQtyByPeruntukan(w.id, i.id, 'mix');
-      return (own + mix) > 0.0001;
+      const k = w.id+'__'+i.id+'__';
+      return (k+peruntukan) in peruntukanIndex || (k+'mix') in peruntukanIndex;
     });
   });
+}
+/* Qty this division could pull right now for an item (own Peruntukan + Mix
+   Use, across Gudang Utama) -- same buckets srItemSourcePlan draws from. */
+function srItemAvailableQty(itemId, divisionId){
+  const division = divisionById(divisionId);
+  const peruntukan = division ? division.wh : divisionId;
+  return STORAGE_WAREHOUSES.reduce((sum,w)=> sum + stockQtyByPeruntukan(w.id, itemId, peruntukan) + stockQtyByPeruntukan(w.id, itemId, 'mix'), 0);
+}
+/* Per-line stock state of a still-pending request line, for Receiving's
+   warning: null = enough, otherwise {state:'kurang'|'habis', available, needed}. */
+function srLineStockState(line){
+  if(!line || line.status!=='menunggu') return null;
+  const plan = srItemSourcePlan(line.itemId, line.toWarehouseId, line.qty);
+  if(plan.sufficient) return null;
+  return { state: plan.totalAvailable<=0.0001 ? 'habis' : 'kurang', available: plan.totalAvailable, needed: line.qty };
+}
+function srDocStockWarnings(lines){
+  return lines.map(l=>({line:l, info:srLineStockState(l)})).filter(x=>x.info);
 }
 function grRenderCombo(idx, query){
   const box = document.getElementById('grCombo'+idx);
@@ -10597,17 +10661,32 @@ function srAddLine(){ srLines.push({itemId:'', qty:'', unit:'uom'}); srRenderLin
 function srRemoveLine(idx){ srLines.splice(idx,1); if(srLines.length===0) srLines.push({itemId:'', qty:'', unit:'uom'}); srRenderLines(); }
 function srUpdateLine(idx, field, value){ srLines[idx][field]=value; srUpdateLineHint(idx); }
 function srHasSmallUnit(item){ return hasSmallUnitConversion(item); }
-function srUpdateLineHint(idx){
-  const line = srLines[idx];
+/* Hint under each Permintaan Barang line: the small-unit conversion (when a
+   small unit is picked) plus a heads-up when this division's stock for the
+   item is empty or short. The request can still be sent either way --
+   Receiving gets flagged on the request itself. */
+function srLineHintHtml(line){
   const item = line.itemId ? itemById(line.itemId) : null;
+  if(!item) return '';
+  const qty = parseFloat(line.qty);
+  const useSmall = line.unit==='small' && srHasSmallUnit(item);
+  const qtyBase = qty>0 ? (useSmall ? qty / item.conversionQty : qty) : 0;
+  let html = '';
+  if(useSmall && qty>0) html += '≈ ' + fmtNum(qtyBase) + ' ' + escapeHtml(item.uom);
+  // Stock warnings are for Receiving/Master only -- the requesting division
+  // doesn't need to know an item is empty/short; Receiving adjusts at the end.
+  if(!canApproveSR(currentRole())) return html;
+  const avail = srItemAvailableQty(item.id, srDivisionId);
+  let warn = '';
+  if(avail <= 0.0001) warn = 'Stok barang ini sedang habis.';
+  else if(qtyBase > avail + 0.0005) warn = 'Stok tersedia hanya ' + fmtNum(avail) + ' ' + escapeHtml(item.uom) + ', kurang dari jumlah diminta.';
+  if(warn) html += (html?' · ':'') + '<span style="color:var(--danger); font-weight:600;">⚠ ' + warn + '</span>';
+  return html;
+}
+function srUpdateLineHint(idx){
   const hint = document.getElementById('srHint'+idx);
   if(!hint) return;
-  if(item && line.unit==='small' && srHasSmallUnit(item) && parseFloat(line.qty)>0){
-    const converted = parseFloat(line.qty) / item.conversionQty;
-    hint.innerHTML = '≈ ' + fmtNum(converted) + ' ' + escapeHtml(item.uom);
-  } else {
-    hint.innerHTML = '';
-  }
+  hint.innerHTML = srLineHintHtml(srLines[idx]);
 }
 function srRenderLines(){
   const box = document.getElementById('srLinesBox');
@@ -10615,7 +10694,7 @@ function srRenderLines(){
   box.innerHTML = srLines.map((line, idx)=>{
     const selected = line.itemId ? itemById(line.itemId) : null;
     const hasSmall = srHasSmallUnit(selected);
-    const initialHint = (hasSmall && line.unit==='small' && parseFloat(line.qty)>0) ? ('≈ ' + fmtNum(parseFloat(line.qty)/selected.conversionQty) + ' ' + escapeHtml(selected.uom)) : '';
+    const initialHint = srLineHintHtml(line);
     return `
     <div style="display:grid; grid-template-columns: 2fr .7fr ${hasSmall?'.9fr':'.6fr'} auto; gap:6px; margin-bottom:2px; align-items:start;">
       <div class="combo-wrap">
@@ -10661,13 +10740,21 @@ function srRenderCombo(idx, query){
   // than the source location actually has.
   const takenIds = new Set(srLines.filter((l,i)=>i!==idx && l.itemId).map(l=>l.itemId));
   const pool = srAvailableItemsPool(srDivisionId).filter(i=>!takenIds.has(i.id));
-  const matches = (q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool).slice(0,300);
+  const filteredPool = q ? pool.filter(i=>i.name.toLowerCase().includes(q)) : pool;
+  // Only Receiving/Master see which items are currently out (in-stock first,
+  // out-of-stock after, flagged). A requesting division just sees one plain list.
+  const showStockInfo = canApproveSR(currentRole());
+  const isOut = i => !(srItemAvailableQty(i.id, srDivisionId) > 0.0001);
+  const matches = (showStockInfo ? filteredPool.filter(i=>!isOut(i)).concat(filteredPool.filter(isOut)) : filteredPool).slice(0,300);
   if(matches.length===0){
-    box.innerHTML = `<div class="combo-item" style="color:var(--text-faint); cursor:default;" onmousedown="return false;">${pool.length===0 ? 'Tidak ada barang yang saat ini tersedia di Gudang Utama untuk divisi ini.' : 'Tidak ada barang yang cocok.'}</div>`;
+    box.innerHTML = `<div class="combo-item" style="color:var(--text-faint); cursor:default;" onmousedown="return false;">${pool.length===0 ? 'Tidak ada barang yang teralokasi di Gudang Utama untuk divisi ini.' : 'Tidak ada barang yang cocok.'}</div>`;
     box.style.display = 'block';
     return;
   }
-  box.innerHTML = matches.map(i=>`<div class="combo-item" onmousedown="srPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}</div>`).join('');
+  box.innerHTML = matches.map(i=>{
+    const out = showStockInfo && isOut(i);
+    return `<div class="combo-item" onmousedown="srPickCombo(${idx},'${i.id}')">${escapeHtml(i.name)}${i.kode?` <span style="color:var(--text-faint);">— ${escapeHtml(i.kode)}</span>`:''}${out?' <span class="tag tag-rejected" style="font-size:9px; padding:1px 6px; margin-left:4px;">Stok habis</span>':''}</div>`;
+  }).join('');
   box.style.display = 'block';
 }
 function srPickCombo(idx, itemId){
@@ -10767,7 +10854,10 @@ function openApproveModal(docNumber){
       </table>
     </div>
   `;
+  // Edit lives here too (Receiving + Master, via canEditSR) so a short/empty
+  // line flagged above can be adjusted without backing out to the detail view.
   const foot = `<button class="btn btn-outline" onclick="closeModal()">Batal</button>` +
+    (canEditSR(currentRole(), lines[0]) ? `<button class="btn btn-outline" onclick="closeModal(); openEditSrModal('${docNumber}')">Edit</button>` : '') +
     (availableCount>0
       ? `<button class="btn btn-outline" onclick="submitApprove('${docNumber}', true)">Setujui Semua (${availableCount})</button><button class="btn btn-primary" onclick="submitApprove('${docNumber}', false)">Setujui yang Dicentang</button>`
       : '');
@@ -11016,12 +11106,12 @@ async function actionWipRequestDoc(payload){
 }
 async function actionApproveWipGate(docNumber){
   const role = currentRole();
-  if(!canApproveKitchenGate(role)){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
   const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber && isWipGatePending(t));
   if(lines.length===0){ toast('Permintaan ini tidak lagi menunggu Kitchen Leader.', true); return; }
+  if(!canActAsKitchenGate(role, lines[0].divisionId)){ toast('Hanya Kitchen Leader (atau Master) yang dapat menyetujui di tahap ini.', true); return; }
   try{
     for(const line of lines){
-      await db.doc('transactions/'+line.id).update({ kitchenGateStatus:'passed', kitchenGateDecidedAt: new Date().toISOString(), kitchenGateByRole: state.role });
+      await db.doc('transactions/'+line.id).update({ kitchenGateStatus:'passed', kitchenGateDecidedAt: new Date().toISOString(), kitchenGateByRole: state.role, kitchenGateByRoleName: role.name });
     }
     toast('Permintaan WIP ' + docNumber + ' diteruskan ke Receiving.');
   }catch(err){
@@ -11029,7 +11119,7 @@ async function actionApproveWipGate(docNumber){
   }
 }
 function confirmApproveWipGate(docNumber){
-  if(!canApproveKitchenGate(currentRole())){ toast('Hanya Kitchen Leader yang dapat menyetujui di tahap ini.', true); return; }
+  if(currentRole().kind!=='master' && !canApproveKitchenGate(currentRole())){ toast('Hanya Kitchen Leader (atau Master) yang dapat menyetujui di tahap ini.', true); return; }
   openConfirm('Setujui Permintaan WIP', 'Setujui Permintaan WIP ' + docNumber + ' dan teruskan ke Receiving?', async ()=>{ await actionApproveWipGate(docNumber); }, 'Setujui', false);
 }
 /* Final step: Receiving/Master marks the request recorded. Unlike
@@ -11057,7 +11147,7 @@ function openRejectWipModal(docNumber){
   const role = currentRole();
   const lines = state.wipRequestTransactions.filter(t=>t.type==='wiprequest' && t.docNumber===docNumber);
   const first = lines[0];
-  const canGate = first && isWipGatePending(first) && canApproveKitchenGate(role);
+  const canGate = first && isWipGatePending(first) && canActAsKitchenGate(role, first.divisionId);
   const canFinal = first && !isWipGatePending(first) && canApproveSR(role);
   if(!canGate && !canFinal){ toast('Peran ini tidak dapat memproses Permintaan WIP.', true); return; }
   const body = `
